@@ -1,6 +1,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/net/openthread.h>
 #include <openthread/coap.h>
 #include <string.h>
 #include <stdlib.h>
