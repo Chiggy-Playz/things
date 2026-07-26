@@ -1,2 +1,5 @@
-build*/
+**/build*/*
+!**/build*/*/
+**/build*/*/*
+!**/build*/*/.vscode-nrf-connect.json
 _archive*/
