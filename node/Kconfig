@@ -1,0 +1,7 @@
+mainmenu "Things Node"
+
+config BLINKY
+	bool "Enable blinky test mode"
+	default n
+
+source "Kconfig.zephyr"
