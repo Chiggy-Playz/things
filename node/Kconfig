@@ -4,4 +4,20 @@ config BLINKY
 	bool "Enable blinky test mode"
 	default n
 
+menu "IR Dialect"
+
+config IR_VOLTAS
+	bool "Voltas AC"
+	default n
+	help
+	  Enable Voltas AC IR dialect.
+
+config IR_TECO
+	bool "Teco AC"
+	default n
+	help
+	  Enable Teco AC IR dialect.
+
+endmenu
+
 source "Kconfig.zephyr"
