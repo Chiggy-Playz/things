@@ -1,0 +1,23 @@
+{
+  "toolchainPath": "/opt/nordic/ncs/toolchains/ccc010f809",
+  "sdkPath": "/opt/nordic/ncs/v3.4.0",
+  "board": "xiao_ble/nrf52840",
+  "boardDir": "/opt/nordic/ncs/v3.4.0/zephyr/boards/seeed/xiao_ble",
+  "boardDirs": [
+    "/opt/nordic/ncs/v3.4.0/zephyr/boards/seeed/xiao_ble"
+  ],
+  "optimizations": "none",
+  "cmakeArgs": [],
+  "confFiles": [
+    "prj.conf"
+  ],
+  "buildDirectory": "build/blinky_thread",
+  "kconfigFragments": [
+    "config/blinky_thread.conf"
+  ],
+  "snippets": [],
+  "dtcOverlays": [
+    "boards/xiao_ble_nrf52840.overlay"
+  ],
+  "extraDtcOverlays": []
+}

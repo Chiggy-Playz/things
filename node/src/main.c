@@ -1,8 +1,10 @@
 #include <zephyr/kernel.h>
 
 #include "blinky/blinky.h"
+#include "blinky_thread/blinky_thread.h"
 #include "ir/ir.h"
 #include "thread/thread.h"
+#include "thread_status_led/thread_status_led.h"
 
 int main(void)
 {
@@ -11,6 +13,14 @@ int main(void)
 #endif
 
 	thread_init();
+
+#if defined(CONFIG_THREAD_STATUS_LED)
+	thread_status_led_init();
+#endif
+
+#if defined(CONFIG_BLINKY_THREAD)
+	blinky_thread_init();
+#endif
 
 #if defined(CONFIG_IR_VOLTAS) || defined(CONFIG_IR_TECO)
 	ir_init();

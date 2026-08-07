@@ -7,7 +7,10 @@
 #include <openthread/ip6.h>
 #include <openthread/link.h>
 #include <openthread/logging.h>
+#include <openthread/srp_client.h>
+#include <zephyr/net/socket.h>
 #include <zephyr/sys/printk.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "thread/thread.h"
@@ -45,13 +48,61 @@ static const char *role_str(otDeviceRole role)
 	}
 }
 
+static thread_connected_cb_t connected_cb;
+static bool notified_connected;
+
+void thread_on_connected(thread_connected_cb_t cb)
+{
+	connected_cb = cb;
+}
+
+/* Debug convenience: UDP-announce non-link-local addresses to a fixed
+ * host (see CONFIG_THREAD_ANNOUNCE_ADDR). No-op if unset. */
+static void announce_address(const uint8_t *b)
+{
+	if (sizeof(CONFIG_THREAD_ANNOUNCE_ADDR) <= 1) {
+		return; /* empty string */
+	}
+
+	char msg[80];
+	snprintf(msg, sizeof(msg),
+		 "%s: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+		 CONFIG_THREAD_HOSTNAME,
+		 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+		 b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+
+	struct sockaddr_in6 dst = {0};
+	dst.sin6_family = AF_INET6;
+	dst.sin6_port = htons(CONFIG_THREAD_ANNOUNCE_PORT);
+	if (zsock_inet_pton(AF_INET6, CONFIG_THREAD_ANNOUNCE_ADDR, &dst.sin6_addr) != 1) {
+		return;
+	}
+
+	int sock = zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0) {
+		return;
+	}
+	zsock_sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&dst, sizeof(dst));
+	zsock_close(sock);
+}
+
 static void on_thread_state_changed(otChangedFlags flags, void *ctx)
 {
 	ARG_UNUSED(ctx);
 	otInstance *instance = openthread_get_default_instance();
 
 	if (flags & OT_CHANGED_THREAD_ROLE) {
-		printk("Thread: role -> %s\n", role_str(otThreadGetDeviceRole(instance)));
+		otDeviceRole role = otThreadGetDeviceRole(instance);
+
+		printk("Thread: role -> %s\n", role_str(role));
+
+		if (!notified_connected && role != OT_DEVICE_ROLE_DISABLED &&
+		    role != OT_DEVICE_ROLE_DETACHED) {
+			notified_connected = true;
+			if (connected_cb) {
+				connected_cb();
+			}
+		}
 	}
 
 	if (flags & OT_CHANGED_IP6_ADDRESS_ADDED) {
@@ -62,6 +113,10 @@ static void on_thread_state_changed(otChangedFlags flags, void *ctx)
 			       "%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
 			       b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
 			       b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+
+			if (!(b[0] == 0xfe && b[1] == 0x80)) {
+				announce_address(b);
+			}
 		}
 	}
 }
@@ -94,6 +149,23 @@ static void configure_dataset(otInstance *instance)
 	otDatasetSetActive(instance, &ds);
 }
 
+/* Buffer must persist for as long as the SRP client uses it. */
+static const char srp_hostname[] = CONFIG_THREAD_HOSTNAME;
+
+static void srp_client_auto_start_cb(const otSockAddr *server_addr, void *ctx)
+{
+	ARG_UNUSED(ctx);
+	printk("SRP: client %s (host \"%s\")\n",
+	       server_addr ? "started" : "stopped", srp_hostname);
+}
+
+static void start_srp_client(otInstance *instance)
+{
+	otSrpClientSetHostName(instance, srp_hostname);
+	otSrpClientEnableAutoHostAddress(instance);
+	otSrpClientEnableAutoStartMode(instance, srp_client_auto_start_cb, NULL);
+}
+
 int thread_init(void)
 {
 	otInstance *instance = openthread_get_default_instance();
@@ -105,6 +177,8 @@ int thread_init(void)
 	otSetStateChangedCallback(instance, on_thread_state_changed, NULL);
 
 	otCoapStart(instance, OT_DEFAULT_COAP_PORT);
+
+	start_srp_client(instance);
 
 	otIp6SetEnabled(instance, true);
 	otThreadSetEnabled(instance, true);
