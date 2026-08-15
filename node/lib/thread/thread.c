@@ -206,10 +206,23 @@ int thread_init(void)
 
 	start_srp_client(instance);
 
-	otIp6SetEnabled(instance, true);
-	otThreadSetEnabled(instance, true);
-
 	openthread_mutex_unlock();
+
+	/* 2026-08-16: was otIp6SetEnabled(instance, true) +
+	 * otThreadSetEnabled(instance, true) called directly here. That
+	 * skips Zephyr's own openthread_run() (modules/openthread/openthread.c),
+	 * which is the ONLY place CONFIG_OPENTHREAD_MTD_SED's sleepy behavior
+	 * actually gets applied - it sets otLinkModeConfig.mRxOnWhenIdle=false
+	 * and otLinkSetPollPeriod() right before enabling Thread. Without that,
+	 * the device attaches as a normal always-listening child regardless of
+	 * CONFIG_OPENTHREAD_MTD_SED/MTD_SED_POLL_PERIOD - the radio just never
+	 * gets told it's allowed to sleep between polls. This, not PM/QSPI/USB,
+	 * is the real explanation for the ~7.5mA that survived every other fix
+	 * (see PROGRESS.md). openthread_run() takes its own lock internally, so
+	 * it must run outside the mutex held above; it reads the dataset already
+	 * committed by configure_dataset() and enables Thread itself.
+	 */
+	openthread_run();
 
 	printk("Thread: started, CoAP on port %d\n", OT_DEFAULT_COAP_PORT);
 	return 0;

@@ -219,13 +219,17 @@ away most of a day) is **resolved** — root cause found, not the mesh, not
 the border router.
 
 **What it actually was**: a worn coin cell with high internal resistance,
-compounded by the node's firmware having **zero power-management
-infrastructure** wired in — no `CONFIG_PM`, no `CONFIG_PM_DEVICE` — meaning
-nothing was ever suspending the radio/peripherals between uses. Measured via
-a proper in-series ammeter: **~8mA constant draw at idle**, not the
-microamp-range a sleepy end device should show. `220mAh (typical CR2032) ÷
-8mA ≈ 27-28 hours` — matches the original symptom's timeline (worked before
-sleep, dead ~24h later, untouched) almost exactly.
+compounded by the node's firmware never actually behaving as a Thread
+Sleepy End Device despite being configured as one — `thread_init()` called
+`otIp6SetEnabled()`/`otThreadSetEnabled()` directly instead of Zephyr's
+`openthread_run()`, which is the only place `CONFIG_OPENTHREAD_MTD_SED`'s
+`mRxOnWhenIdle=false` + poll period actually get applied (see
+`modules/openthread/openthread.c` in the Zephyr tree). The radio was just
+listening continuously the whole time. Measured via a proper in-series
+ammeter: **~8mA constant draw at idle**, not the microamp-range a sleepy end
+device should show. `220mAh (typical CR2032) ÷ 8mA ≈ 27-28 hours` — matches
+the original symptom's timeline (worked before sleep, dead ~24h later,
+untouched) almost exactly.
 
 Confirmed via direct observation, not just inference: watched the dying
 cell's voltage collapse to 0V and partially recover repeatedly under load
@@ -242,39 +246,59 @@ delivered to the nRF52840 — a real hardware/chemistry mismatch (coin cell
 vs. what this board's power path expects), compounding the primary cause
 but not the root cause by itself.
 
-### Node firmware changes (made 2026-08-15/16 night) — NOT YET REBUILT/REFLASHED/VERIFIED
+### Node firmware changes — REBUILT, REFLASHED, RE-MEASURED, RESOLVED (2026-08-16)
 
-`node/prj.conf`:
-- `CONFIG_RESET_ON_FATAL_ERROR=y` — was unset; any fault previously caused a
-  silent permanent halt (no watchdog either) requiring a manual power cycle.
-- `CONFIG_PM=y`, `CONFIG_PM_DEVICE=y` — was completely absent; this is the
-  actual fix for the ~8mA idle draw, assuming the radio driver in this SDK
-  properly implements device-PM suspend (documented as generally true for
-  Zephyr's nRF5 support, not independently re-verified here).
-- `CONFIG_SERIAL=n`, `CONFIG_CONSOLE=n`, `CONFIG_UART_CONSOLE=n` — this node
-  never has a physical console connected (reverted early in the project);
-  Nordic's own power-optimization docs measure ~470uA saved by disabling
-  this. New `node/config/debug_console.conf` fragment re-enables it when
-  actually needed for debugging — add it as an extra Kconfig fragment, don't
-  hand-edit `prj.conf` back and forth.
+The first hypothesis (`CONFIG_PM=y`/`CONFIG_PM_DEVICE=y` as "the fix") turned
+out to be **completely wrong** on this SoC, caught by rebuilding and
+re-measuring rather than trusting the Kconfig assignment: nRF52 never
+selects `HAS_PM` (see `soc/nordic/nrf52/Kconfig`), so `CONFIG_PM` is silently
+forced back to `n` regardless of `prj.conf` — that's the literal
+"assigned y, but got n" warning that kicked off this whole investigation.
+Both lines were removed.
 
-`node/boards/ir.overlay`: added a `sleep` pinctrl state for the IR LED's PWM
-pin — required once `CONFIG_PM_DEVICE=y` was added; without it the build
-fails with `static assertion failed: ".../pwm@... defined without sleep
-state"`. Zephyr enforces this at compile time for any PM-managed peripheral.
+What followed was a real bisection across several genuine (but ultimately
+not-the-cause) fixes, each verified by rebuild + reflash + remeasure rather
+than assumed:
+1. **Console off** (`CONFIG_SERIAL/CONSOLE/UART_CONSOLE=n`) + dropping dead
+   `CONFIG_PM`: ~8mA → 7.44mA. Real (~470uA-class), not the story.
+2. **QSPI flash suspend** (`CONFIG_PM_DEVICE_RUNTIME=y` +
+   `zephyr,pm-device-runtime-auto` on `node/boards/xiao_ble_nrf52840.overlay`'s
+   `p25q16h` node — the onboard QSPI NOR is unused by this app, settings live
+   on internal flash): 7.44mA → 7.45mA. No effect.
+3. **USB device stack disabled** (`CONFIG_USB_DEVICE_STACK_NEXT=n`,
+   `CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT=n` — xiao_ble's console actually
+   routes over USB CDC-ACM by devicetree default, a separate subsystem from
+   `CONFIG_SERIAL`/`CONFIG_CONSOLE` entirely): 7.45mA → 7.5mA. No effect.
+4. **Isolation test** (`blinky` build, no Thread/radio at all): idle dropped
+   to **~5uA**, ~200uA per LED — proved the board/SoC/Zephyr baseline was
+   already clean, and fixes 1-3 were real but not the dominant cause.
+5. **Isolation test 2** (`blinky_thread` build, Thread+radio active, zero
+   IR/PWM code): still ~7.5mA — isolated the problem to OpenThread/radio
+   specifically, not the IR blaster code.
+6. **Actual root cause**, found by reading `modules/openthread/openthread.c`:
+   `thread_init()` (`node/lib/thread/thread.c`) called
+   `otIp6SetEnabled()`/`otThreadSetEnabled()` directly instead of Zephyr's
+   `openthread_run()`. Only `openthread_run()` applies the SED-specific
+   `otThreadSetLinkMode()` (`mRxOnWhenIdle=false`) + `otLinkSetPollPeriod()`
+   before enabling Thread — calling the raw APIs skips that step entirely,
+   so the device was attaching as a normal always-listening child no matter
+   what `CONFIG_OPENTHREAD_MTD_SED` said. Fixed by replacing the two direct
+   calls with `openthread_run()`.
 
-**Important gap**: none of the above has been rebuilt, reflashed to the
-actual node, or re-measured for real current draw since being written. The
-theory (worn cell + zero PM = the whole story) is well-supported by
-observation, but the *fix* is unverified. Do this before considering the
-node problem fully closed:
-1. Rebuild `chiggy_room_climate_controller`, reflash.
-2. Re-run the same in-series ammeter test from tonight — expect idle draw
-   to drop from ~8mA toward microamp range if `CONFIG_PM`/`CONFIG_PM_DEVICE`
-   worked as expected.
-3. If it's still high, the radio driver may not implement device-PM suspend
-   properly in this SDK version — would need further investigation, not
-   assumed fixed just because the Kconfig is now set.
+**Confirmed working on real hardware, both test build and the actual
+production firmware**: idle current now cycles **10-90uA** (the expected
+sleepy-poll wake/sleep pattern, ~500ms period), briefly rising to ~300uA
+when handling an actual CoAP command. `220mAh ÷ ~30uA average ≈ 300+ days` —
+vs. the original ~27-28 hours. Node has been rebuilt and reflashed with all
+of the above; ready to go back in service.
+
+Also still true, unrelated to power and not yet addressed: `node/prj.conf`
+now disables the console entirely (both UART and USB-CDC paths), so
+`CONFIG_PRINTK=y` (from `config/climate.conf`) has no backend left — those
+`printk()` calls silently no-op. Harmless, but worth knowing if debug output
+is ever needed again (`config/debug_console.conf` re-enables UART/console,
+though not the USB path — that fragment predates this finding and may need
+a matching USB counterpart if USB-console debugging is ever wanted).
 
 ### Also still true from before, unrelated to tonight
 

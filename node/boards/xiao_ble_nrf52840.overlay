@@ -1,0 +1,16 @@
+/*
+ * The onboard QSPI NOR flash (p25q16h) is unused by this app - the
+ * settings_storage partition lives on internal flash (see the board's
+ * pm_static.yml). Left at its power-on default it just sits there powered
+ * and active, drawing current for nothing. This DT property is what actually
+ * triggers pm_device_runtime_enable() for it after init (see
+ * include/zephyr/pm/device.h's DT_PROP_OR(..., zephyr_pm_device_runtime_auto)
+ * check in kernel/device.c) - the driver (drivers/flash/nrf_qspi_nor.c)
+ * already calls pm_device_runtime_get()/put_async() around every access and
+ * implements a real suspend (deep-power-down + pinctrl sleep state), it just
+ * needs runtime PM switched on for this instance. Requires
+ * CONFIG_PM_DEVICE=y + CONFIG_PM_DEVICE_RUNTIME=y in prj.conf.
+ */
+&p25q16h {
+	zephyr,pm-device-runtime-auto;
+};

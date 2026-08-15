@@ -15,8 +15,7 @@
   "kconfigFragments": [
     "config/chiggy_room.conf",
     "config/climate.conf",
-    "config/voltas.conf",
-    "config/debug_console.conf"
+    "config/voltas.conf"
   ],
   "snippets": [],
   "dtcOverlays": [

@@ -77,8 +77,11 @@ below accumulate *all* of them, not just the current one.
   causing other side effects — currently live-only, resets on reboot. See
   `hub/docs/border-router-native.md`'s "RESOLVED" section for exact
   commands and what to watch for first.
-- Rebuild/reflash/re-measure the node's power-management firmware fixes
-  (still unverified — see `PROGRESS.md`).
+- ~~Rebuild/reflash/re-measure the node's power-management firmware
+  fixes~~ — **done 2026-08-16**: idle current confirmed at 10-90uA on real
+  hardware (was ~8mA). Root cause wasn't `CONFIG_PM` (dead on nRF52 in this
+  Zephyr version) but `thread_init()` bypassing Zephyr's `openthread_run()`,
+  which skipped the sleepy-device radio config entirely. See `PROGRESS.md`.
 - Battery voltage reporting (planned, no code written).
 - A real Home Assistant integration for the AC node itself, beyond raw
   `ac.sh`/`coap-client` (three options sketched, none chosen) — now that
