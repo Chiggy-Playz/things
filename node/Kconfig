@@ -14,12 +14,13 @@ config THREAD_HOSTNAME
 
 config THREAD_ANNOUNCE_ADDR
 	string "IPv6 address to UDP-announce addresses to (debug)"
-	default ""
+	default "fd2c:6656:1f1a:34af:4a4d:7eff:feed:5301"
 	help
-	  If set, every non-link-local IPv6 address this device gets is
-	  sent as a plain UDP text message here whenever it changes -
-	  lets you discover the node's reachable address without needing
-	  console access. Leave blank (default) to disable.
+	  Every non-link-local IPv6 address this device gets is sent as a
+	  plain UDP text message here whenever it changes - lets you
+	  discover the node's reachable address without needing console
+	  access. Defaults to hermes; override per build type, or set to
+	  "" to disable.
 
 config THREAD_ANNOUNCE_PORT
 	int "UDP port for address announce"

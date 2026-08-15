@@ -2,6 +2,7 @@
 #include <zephyr/net/openthread.h>
 #include <openthread/coap.h>
 #include <openthread/dataset.h>
+#include <openthread/error.h>
 #include <openthread/instance.h>
 #include <openthread/thread.h>
 #include <openthread/ip6.h>
@@ -159,10 +160,35 @@ static void srp_client_auto_start_cb(const otSockAddr *server_addr, void *ctx)
 	       server_addr ? "started" : "stopped", srp_hostname);
 }
 
+/* SRP client only ever sends an "SRP Update" once a host name, a host
+ * address, AND at least one service are all set - otherwise it sits
+ * "started" forever without ever transmitting anything. This service
+ * registration is what actually triggers registration; without it,
+ * otSrpClientEnableAutoStartMode() firing "started" is a no-op. Advertises
+ * the CoAP endpoint this node already runs. */
+static otSrpClientService coap_service = {
+	.mName = "_coap._udp",
+	.mInstanceName = srp_hostname,
+	.mPort = OT_DEFAULT_COAP_PORT,
+};
+
+static void srp_client_callback(otError error, const otSrpClientHostInfo *host_info,
+				 const otSrpClientService *services,
+				 const otSrpClientService *removed_services, void *ctx)
+{
+	ARG_UNUSED(host_info);
+	ARG_UNUSED(services);
+	ARG_UNUSED(removed_services);
+	ARG_UNUSED(ctx);
+	printk("SRP: update result: %s\n", otThreadErrorToString(error));
+}
+
 static void start_srp_client(otInstance *instance)
 {
 	otSrpClientSetHostName(instance, srp_hostname);
 	otSrpClientEnableAutoHostAddress(instance);
+	otSrpClientSetCallback(instance, srp_client_callback, NULL);
+	otSrpClientAddService(instance, &coap_service);
 	otSrpClientEnableAutoStartMode(instance, srp_client_auto_start_cb, NULL);
 }
 

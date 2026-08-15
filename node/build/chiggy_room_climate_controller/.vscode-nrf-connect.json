@@ -13,8 +13,10 @@
   ],
   "buildDirectory": "build/chiggy_room_climate_controller",
   "kconfigFragments": [
+    "config/chiggy_room.conf",
     "config/climate.conf",
-    "config/voltas.conf"
+    "config/voltas.conf",
+    "config/debug_console.conf"
   ],
   "snippets": [],
   "dtcOverlays": [
