@@ -1,6 +1,7 @@
 # Project status — read this first in a new session
 
-Last updated: 2026-08-16 (night). Supersedes the 2026-08-11 version entirely
+Last updated: 2026-08-16 (early morning, continued from the night session).
+Supersedes the 2026-08-11 version entirely
 — that session's active problem is resolved, and the architecture described
 there (standalone `ot_br`) is no longer what's running. Trust this over
 anything you remember from a summarized/compacted history.
@@ -79,44 +80,121 @@ forwarding issue above, this isn't a cross-interface problem — SRP traffic
 goes directly to the BR's own mesh-local address, entirely within the
 mesh. Root cause not yet found.
 
-**Still open (2026-08-16, unresolved after significant investigation)**:
-hermes→node CoAP commands (`ac on`/`ac off`, tested directly and via a
-`/led` test on `blinky_thread`) are unreliable — every attempt sends,
-retries 4x over ~70-85s (CoAP's own exponential backoff), then gives up
-with **zero response ever received**, no matter what. The user specifically
-recalls this direction working when the old standalone `ot_br` (ESP32,
-Docker/Omarchy-free) was flashed — so this is very likely something
-specific to the new native-`otbr-agent`-on-Linux architecture, not a
-Thread/CoAP-inherent limitation. `ot_br` is embedded firmware with its own
-internal WiFi↔802.15.4 routing — no Linux kernel, no `ip6tables`, no `wpan0`
-TUN device at all. `otbr-agent` is a real Linux daemon relying on the
-kernel's actual IP stack/netfilter/TUN — a genuinely new, more complex
-surface area that didn't exist before.
+**RESOLVED (2026-08-16, early morning)**: hermes→node CoAP commands (`ac
+on`/`ac off`, `/led` on `blinky_thread`) were unreliable — every attempt
+sent, retried 4x over ~70-85s, then gave up with zero response. **Root
+cause: nothing to do with `otbr-agent`, the mesh, or `ip6tables` at all —
+hermes simply had no IPv6 route to the node's OMR prefix
+(`fd21:6d0:845:1::/64`)**, so its CoAP packets went out hermes's normal
+internet default gateway and vanished before ever reaching iris.
 
-**Ruled out so far, with hard evidence**:
-- App-level code — identical failure on two completely different, simple
-  CoAP handlers (`/ir` and `/led`).
-- `ip6tables` policy — `OT_FORWARD_INGRESS` chain confirmed `ACCEPT`s this
-  traffic (rule counter incremented at least once), node's OMR prefix
-  confirmed present in `otbr-ingress-allow-dst` ipset.
-- Kernel routing decision — `ip -6 route get <node-addr>` correctly
-  resolves to `dev wpan0`.
-- `trel://` radio link — removed entirely from `otbr-agent-start.sh`
-  (this node has zero TREL support, was copied from the original Docker
-  script unnecessarily) — **did not fix it**, ruled out as sole cause.
-  5/5 repeated test attempts after removal still failed identically.
+Confirmed step by step:
+- `tcpdump -i wpan0 -n` on iris during a failed attempt from hermes showed
+  **zero packets from hermes ever arriving** — only otbr-agent's own
+  routine `ff02::1` multicast advertisements. This proved the failure was
+  upstream of `wpan0`/iris entirely, not a mesh-forwarding or firewall
+  problem (confirming the "not yet checked" item below, but pointing away
+  from iris rather than at it).
+- Same test repeated from this Mac (LAN, same network as iris) **worked
+  immediately** — LED turned on. This isolated the problem to hermes
+  specifically, not the border router.
+- On hermes: `ip -6 route show` had no route at all to
+  `fd21:6d0:845:1::/64`. Root cause:
+  `net.ipv6.conf.enp2s0.accept_ra_rt_info_max_plen` (the **per-interface**
+  value, not `conf.all.*`) was `0`, so hermes was ignoring the Route
+  Information Option in iris's Router Advertisement that says "route this
+  prefix via me". Setting `conf.all.*` alone (which is what
+  `sudo sysctl -w net.ipv6.conf.all.accept_ra_rt_info_max_plen=64` sets)
+  did **not** propagate to the already-existing `enp2s0` value — on this
+  kernel the per-interface value has to be set explicitly for it to take
+  effect on real traffic.
 
-**Not yet checked**: whether the packet actually reaches the `wpan0`
-interface at the kernel level at all — `tcpdump` isn't installed on `iris`
-yet (`sudo apt install tcpdump`, then capture on `wpan0` during a test
-attempt). Everything checked so far relies on `otbr-agent`'s *own* log,
-which only shows what it chooses to log — if the packet reaches `wpan0` but
-otbr-agent silently fails to process it without logging anything, tcpdump
-would be the way to actually see that. This is the natural next step.
-Also worth checking: whether the `otbr-ingress-allow-dst`/`deny-src` ipsets
-are dynamically managed by otbr-agent (re-evaluated periodically) rather
-than static — if so, there could be brief windows where the destination
-isn't actually allow-listed, causing intermittent drops.
+**Fix, applied and persisted on hermes**:
+```bash
+sudo sysctl -w net.ipv6.conf.enp2s0.accept_ra_rt_info_max_plen=64
+echo 'net.ipv6.conf.enp2s0.accept_ra_rt_info_max_plen=64' | sudo tee /etc/sysctl.d/99-ra-route-info.conf
+sudo sysctl --system
+sudo rdisc6 enp2s0   # forces a fresh RA immediately instead of waiting for iris's next periodic one
+```
+After this, `ip -6 route show` on hermes shows
+`fd21:6d0:845:1::/64 via fe80::dea6:32ff:fe0e:ed71 dev enp2s0 proto ra`, and
+`ac on`/`ac off`/`/led` color changes from hermes worked 3/3 (confirmed by
+physically watching the LED turn on, off, then red).
+
+This also retroactively explains why the earlier "outbound direction
+works fine" observation didn't contradict this: the node's own UDP
+announce/SRP registration are *mesh→LAN*, which only needed iris's kernel
+forwarding (fixed earlier the same night). This bug was specifically about
+a *LAN host* needing to learn a route *into* the mesh's OMR prefix via RA —
+a genuinely new requirement introduced by real Linux-kernel routing
+(`otbr-agent`) that the old embedded `ot_br` firmware never needed, since
+it had no real IP routing stack at all. So the original hypothesis ("new
+architecture's real IP routing surface") was directionally right, just
+pointing at the wrong host (hermes, not iris).
+
+**Second part, also RESOLVED (2026-08-16, same session, ~15 min later)**:
+even after the hermes route fix, `coap-client`/`ac.sh` never received the
+CoAP ACK back — every attempt still showed retransmissions and a
+client-side timeout, **despite the command demonstrably executing on the
+node every time** (LED changes confirmed visually, 3/3, including one
+"instantly turns off on the very first send" observation that proved the
+*forward* path was fast and healthy — the retries were 100% about the
+response, not the command).
+
+Diagnosed with a `tcpdump -i any -n port 5683` capture on iris spanning
+*both* `wpan0` and `wlan0` during one request: it showed the node's 4-byte
+ACK arriving on `wpan0` (`In`) every single time, but **never** going back
+out `wlan0`. So the node and the mesh side were completely fine — the
+drop was specifically in iris's mesh→LAN forwarding, the mirror image of
+the bug already fixed earlier that night.
+
+**Root cause: a direct, unintended side effect of that earlier fix.**
+Setting `net.ipv6.conf.all.forwarding=1` (to fix the *first* bug) makes
+Linux treat the interface as a router — and by default, a router
+**stops accepting Router Advertisements** on that interface
+(`accept_ra=1` means "accept RAs only if forwarding is disabled";
+`accept_ra=2` is needed to keep accepting them regardless). The moment
+forwarding was turned on, `wlan0` silently lost the ability to
+(re-)acquire a global IPv6 address/route from the real LAN router. It
+didn't fail immediately — iris was still using an address/route it had
+learned *before* forwarding was enabled (which is why the UDP-announce
+test passed right after that earlier fix) — it only became visible once
+that old lease's lifetime expired with nothing renewing it, leaving
+`wlan0` with just a link-local address and literally no route to hermes
+(`ip -6 route get <hermes-addr>` → `Network is unreachable`).
+
+**Fix, confirmed working, currently LIVE-ONLY / NOT YET PERSISTED** (the
+user deliberately wants to watch for side effects before making this
+survive a reboot — same class of bug as caused this in the first place):
+```bash
+sudo sysctl -w net.ipv6.conf.wlan0.accept_ra=2
+sudo rdisc6 wlan0   # forces a fresh RA immediately (needs `ndisc6`)
+```
+After this, `wlan0` picked up real global addresses (including a genuinely
+globally-routed one, `2406:b400:71:7b22:.../64` — not just a private
+prefix) and a default route via RA. Full round trip re-tested from hermes
+immediately after: CoAP ACK (`t:ACK c:2.04`) received, `coap-client` exit
+code `0`, no retransmissions, LED confirmed on. Re-checked the *original*
+forwarding fix wasn't itself broken by this change: `forwarding` still `1`
+on `all`/`wpan0`/`wlan0`, `OT_FORWARD_INGRESS` ACCEPT rule still counting
+packets, LED still toggles reliably — no regression.
+
+**Not yet done** (holding off intentionally): persist
+`net.ipv6.conf.wlan0.accept_ra=2` to `/etc/sysctl.d/` and add it next to
+the existing `forwarding=1` defense-in-depth line in
+`otbr-agent-start.sh` — right now this resets on iris's next reboot, and
+the original CoAP-response-lost symptom would silently return once the
+freshly-relearned address/route eventually expires again (same delayed-
+failure pattern as before). Two things worth actually checking before
+persisting, not just waiting and hoping:
+1. Router's own IPv6 firewalling — `wlan0` having a real global address
+   with iris's `ip6tables INPUT` chain at default `ACCEPT`, zero rules,
+   means iris is more directly internet-reachable than before this
+   session. Acceptable on this home network, per the user, but worth
+   knowing if this Pi ever moves somewhere less trusted.
+2. iris now has a real default route out `wlan0` it didn't meaningfully
+   have before — shouldn't matter for Thread traffic specifically, but
+   worth remembering if iris ever does anything else network-facing.
 
 Test commands used throughout, for reference:
 ```bash

@@ -51,15 +51,32 @@ below accumulate *all* of them, not just the current one.
   anything because `otSrpClientAddService()` was never called (fixed in
   `node/lib/thread/thread.c`, now registers `_coap._udp` — confirmed
   working via real mDNS resolution and `avahi-browse`). A third issue
-  surfaced and remains **unresolved**: CoAP commands sent *to* a node from
-  the LAN fail reliably, while the reverse direction works fine. Full
-  ruled-out list and next steps in `hub/docs/border-router-native.md`.
+  surfaced: CoAP commands sent *to* a node from the LAN fail reliably,
+  while the reverse direction works fine.
+- **2026-08-16 (early morning, continued)**: that third issue turned out
+  to be two separate bugs stacked on top of each other, both now fixed.
+  First: hermes itself had no route to the mesh's OMR prefix, because
+  `net.ipv6.conf.enp2s0.accept_ra_rt_info_max_plen` (the per-interface
+  value, not `all`) was `0` — fixed hermes-side, and persisted. Second,
+  found immediately after via a `tcpdump` spanning both of iris's
+  interfaces at once: the node's CoAP response was arriving at iris fine
+  but never leaving it, because the *earlier* `forwarding=1` fix (above)
+  had a side effect — enabling forwarding makes Linux stop accepting
+  Router Advertisements on that interface by default, so iris's `wlan0`
+  silently lost its own LAN-side address/route over time. Fixed with
+  `net.ipv6.conf.wlan0.accept_ra=2` on iris — **confirmed working
+  (`ac on`/`ac off` clean round trip, LED toggled both ways twice in a
+  row), but currently live-only, deliberately not yet persisted** pending
+  more confidence it has no further side effects of its own. Full writeup
+  in `hub/docs/border-router-native.md`.
 
-## What's NOT yet done (as of 2026-08-16)
+## What's NOT yet done (as of 2026-08-16, early morning)
 
-- **Fix the open LAN→node CoAP delivery issue** — see
-  `hub/docs/border-router-native.md`'s "Known unresolved issue" section;
-  `tcpdump` on the Pi's `wpan0` is the next untried diagnostic step.
+- **Persist the `wlan0` `accept_ra=2` fix on iris** (`/etc/sysctl.d/` +
+  `otbr-agent-start.sh`'s defense-in-depth block) once satisfied it's not
+  causing other side effects — currently live-only, resets on reboot. See
+  `hub/docs/border-router-native.md`'s "RESOLVED" section for exact
+  commands and what to watch for first.
 - Rebuild/reflash/re-measure the node's power-management firmware fixes
   (still unverified — see `PROGRESS.md`).
 - Battery voltage reporting (planned, no code written).
