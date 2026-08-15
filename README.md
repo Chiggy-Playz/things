@@ -45,14 +45,28 @@ below accumulate *all* of them, not just the current one.
   the way: the USB-Serial-JTAG RCP transport doesn't exist in ESP-IDF
   5.4.x's Kconfig at all (see `hub/docs/rcp-firmware.md`) — the shared
   ESP-IDF checkout is now on 5.5.5.
+- **2026-08-16 (later same night)**: two more real bugs found and fixed —
+  kernel IPv6 forwarding was disabled on the Pi (broke all LAN↔mesh
+  traffic silently), and the node's SRP client never actually registered
+  anything because `otSrpClientAddService()` was never called (fixed in
+  `node/lib/thread/thread.c`, now registers `_coap._udp` — confirmed
+  working via real mDNS resolution and `avahi-browse`). A third issue
+  surfaced and remains **unresolved**: CoAP commands sent *to* a node from
+  the LAN fail reliably, while the reverse direction works fine. Full
+  ruled-out list and next steps in `hub/docs/border-router-native.md`.
 
 ## What's NOT yet done (as of 2026-08-16)
 
-- Confirm the AC node actually attaches to the new Pi-based border router
-  and that `ac on`/`ac off` work through it end-to-end.
-- Rebuild/reflash/re-measure the node's power-management firmware fixes.
+- **Fix the open LAN→node CoAP delivery issue** — see
+  `hub/docs/border-router-native.md`'s "Known unresolved issue" section;
+  `tcpdump` on the Pi's `wpan0` is the next untried diagnostic step.
+- Rebuild/reflash/re-measure the node's power-management firmware fixes
+  (still unverified — see `PROGRESS.md`).
 - Battery voltage reporting (planned, no code written).
 - A real Home Assistant integration for the AC node itself, beyond raw
-  `ac.sh`/`coap-client` (three options sketched, none chosen).
+  `ac.sh`/`coap-client` (three options sketched, none chosen) — now that
+  `_coap._udp` service discovery works, this is more tractable than before.
+  TXT record schema (capabilities, firmware SHA) discussed but not yet
+  implemented.
 
 See `PROGRESS.md` for the full detail on all of the above.

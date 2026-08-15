@@ -154,9 +154,79 @@ exec /usr/local/bin/otbr-agent \
     -d"${OT_LOG_LEVEL}" -v -s \
     -I "${OT_THREAD_IF}" \
     -B "${OT_INFRA_IF}" \
-    "${OT_RCP_DEVICE}" \
-    "trel://${OT_INFRA_IF}"
+    "${OT_RCP_DEVICE}"
 ```
+
+**Do not add `"trel://${OT_INFRA_IF}"` as a second RadioURL argument here**,
+even though the original Docker `run` script this is based on includes it.
+This node has zero TREL (Thread Radio Encapsulation over IP) support — it's
+a plain 802.15.4-only Zephyr device. It was present in an earlier version
+of this script, removed 2026-08-16 as a (disproven) hypothesis for the
+LAN→mesh CoAP delivery issue below — removing it didn't fix that issue, but
+there's also no reason to keep an unused radio link around, so it stays
+out.
+
+## Known unresolved issue (2026-08-16): hermes→node CoAP is unreliable
+
+**Symptom**: any CoAP request sent from the LAN (e.g. hermes) toward a node
+— `ac on`, `ac off`, a plain `/led` test on `blinky_thread` — sends, retries
+4x over ~70-85s (CoAP's own exponential backoff), then gives up with zero
+response, every single time tested (5/5 in a row). This is the *inbound*
+direction (LAN → mesh); the *outbound* direction (mesh → LAN, e.g. the
+node's UDP announce, or its SRP registration) works completely reliably —
+see the two fixes above. This asymmetry is the key clue.
+
+**Confirmed NOT the cause** (checked with hard evidence, in this order —
+don't re-check these without a new reason to):
+1. App-level code — identical failure on two unrelated, simple CoAP
+   handlers (`/ir` and `/led`), rules out anything node-firmware-specific.
+2. `ip6tables` policy — `sudo ip6tables -L OT_FORWARD_INGRESS -v -n` shows
+   the relevant ACCEPT rule has a nonzero packet counter (traffic *has*
+   gotten through this rule at least once), and `sudo ipset list
+   otbr-ingress-allow-dst` contains the node's actual OMR prefix.
+3. Kernel routing — `ip -6 route get <node-address>` correctly resolves to
+   `dev wpan0`.
+4. `trel://` radio link — removed entirely (see above), re-tested 5x,
+   identical failure every time. Not the (sole) cause.
+
+**The one telling piece of evidence found so far**: across every capture of
+`otbr-agent`'s own log (`-d7`, maximally verbose) during a failed attempt,
+there is **zero mention of the node's destination address anywhere** — no
+`MeshForwarder-: Received IPv6 UDP msg ... dst:[node-address]` line, ever.
+Only routine self-generated multicast traffic (`ff02::1` advertisements)
+shows up. This means the request is not reaching `otbr-agent`'s own
+application-level processing at all — but since everything checked above
+(firewall, kernel routing) says it *should* be getting there, the failure
+point is somewhere between "kernel hands the packet to the `wpan0` TUN
+device" and "otbr-agent's own log would show it arriving" — a gap that
+hasn't been directly observed yet.
+
+**Next steps, in order, for whoever picks this up**:
+1. `sudo apt install tcpdump` on `iris` (not installed as of 2026-08-16),
+   then capture on `wpan0` specifically (`sudo tcpdump -i wpan0 -n`) during
+   a fresh test attempt. This checks one level below everything already
+   checked — does the packet reach the interface *at all*, independent of
+   whether `otbr-agent` logs anything about it. This is the single most
+   informative untried check.
+2. Check whether `otbr-ingress-allow-dst`/`otbr-ingress-deny-src` are
+   dynamically re-evaluated by `otbr-agent` over time (not just checked
+   once, statically) — if so, there may be brief windows where the
+   destination isn't actually allow-listed, causing intermittent (not
+   deterministic) drops. Compare ipset contents across several test
+   attempts, not just once.
+3. Structural hypothesis worth keeping in mind throughout: the old
+   standalone `ot_br` (retired, see `architecture.md`) is embedded firmware
+   with its own internal WiFi↔802.15.4 routing — no Linux kernel, no
+   `ip6tables`, no `wpan0` TUN device at all. The user specifically recalls
+   this exact direction (LAN→node commands) working reliably under that
+   old architecture. `otbr-agent`-on-Linux introduces a genuinely new,
+   more complex code path (real kernel IP stack + netfilter + TUN device)
+   for this exact traffic pattern that did not exist before — the bug is
+   very likely somewhere in that new surface area specifically, not a
+   Thread/CoAP-inherent limitation.
+
+Full investigation detail and exact commands used: see `PROGRESS.md` at the
+repo root.
 
 **Gotcha**: `--vendor-name`/`--model-name` are required — `otbr-agent` exits
 immediately with `Vendor name must be set.` without them. Easy to miss

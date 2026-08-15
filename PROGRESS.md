@@ -79,9 +79,60 @@ forwarding issue above, this isn't a cross-interface problem — SRP traffic
 goes directly to the BR's own mesh-local address, entirely within the
 mesh. Root cause not yet found.
 
-**Not yet done on the border router side**: confirm `ac on`/`ac off` work
-end-to-end through hermes now that forwarding is fixed — this was the
-natural next test when the session pivoted to the SRP mystery instead.
+**Still open (2026-08-16, unresolved after significant investigation)**:
+hermes→node CoAP commands (`ac on`/`ac off`, tested directly and via a
+`/led` test on `blinky_thread`) are unreliable — every attempt sends,
+retries 4x over ~70-85s (CoAP's own exponential backoff), then gives up
+with **zero response ever received**, no matter what. The user specifically
+recalls this direction working when the old standalone `ot_br` (ESP32,
+Docker/Omarchy-free) was flashed — so this is very likely something
+specific to the new native-`otbr-agent`-on-Linux architecture, not a
+Thread/CoAP-inherent limitation. `ot_br` is embedded firmware with its own
+internal WiFi↔802.15.4 routing — no Linux kernel, no `ip6tables`, no `wpan0`
+TUN device at all. `otbr-agent` is a real Linux daemon relying on the
+kernel's actual IP stack/netfilter/TUN — a genuinely new, more complex
+surface area that didn't exist before.
+
+**Ruled out so far, with hard evidence**:
+- App-level code — identical failure on two completely different, simple
+  CoAP handlers (`/ir` and `/led`).
+- `ip6tables` policy — `OT_FORWARD_INGRESS` chain confirmed `ACCEPT`s this
+  traffic (rule counter incremented at least once), node's OMR prefix
+  confirmed present in `otbr-ingress-allow-dst` ipset.
+- Kernel routing decision — `ip -6 route get <node-addr>` correctly
+  resolves to `dev wpan0`.
+- `trel://` radio link — removed entirely from `otbr-agent-start.sh`
+  (this node has zero TREL support, was copied from the original Docker
+  script unnecessarily) — **did not fix it**, ruled out as sole cause.
+  5/5 repeated test attempts after removal still failed identically.
+
+**Not yet checked**: whether the packet actually reaches the `wpan0`
+interface at the kernel level at all — `tcpdump` isn't installed on `iris`
+yet (`sudo apt install tcpdump`, then capture on `wpan0` during a test
+attempt). Everything checked so far relies on `otbr-agent`'s *own* log,
+which only shows what it chooses to log — if the packet reaches `wpan0` but
+otbr-agent silently fails to process it without logging anything, tcpdump
+would be the way to actually see that. This is the natural next step.
+Also worth checking: whether the `otbr-ingress-allow-dst`/`deny-src` ipsets
+are dynamically managed by otbr-agent (re-evaluated periodically) rather
+than static — if so, there could be brief windows where the destination
+isn't actually allow-listed, causing intermittent drops.
+
+Test commands used throughout, for reference:
+```bash
+# resolve + test with full CoAP debug output
+ADDR=$(avahi-resolve -6 -n <hostname>.local | awk '{print $2}')
+coap-client -m post -e '{"cmd":"power_on"}' -v 7 "coap://[$ADDR]/ir"
+
+# check whether the BR's own log shows the request arriving at all
+sudo journalctl -u otbr-agent --no-pager --since "<time>" --until "<time>" \
+  | grep -viE "BorderRouting|MulticastDns--: Adding host|TrelPeerTable|TrelDiscoverer|Advertisement"
+
+# check firewall/routing state
+sudo ip6tables -L OT_FORWARD_INGRESS -v -n --line-numbers
+sudo ipset list otbr-ingress-allow-dst
+ip -6 route get <node-address>
+```
 
 ## The AC node: original problem (found 2026-08-11, root-caused 2026-08-15/16)
 
