@@ -300,6 +300,34 @@ is ever needed again (`config/debug_console.conf` re-enables UART/console,
 though not the USB path — that fragment predates this finding and may need
 a matching USB counterpart if USB-console debugging is ever wanted).
 
+### Battery voltage reporting — implemented and verified working (2026-08-16)
+
+Node's coin cell is wired directly to `3V3`/`GND` (no regulator, no BQ25101
+in that path) — so VDD *is* the battery voltage. Read via the nRF52840
+SAADC's internal VDD channel (`NRF_SAADC_VDD`, internal 0.6V ref + 1/6 gain,
+`node/boards/xiao_ble_nrf52840.overlay`) — no extra pin, no extra current
+draw beyond the one-shot conversion. (The board's own onboard divider on
+`P0.14`/`P0.31` taps `VBAT`, the charge IC's input net, which is unconnected
+in this wiring — doesn't apply here.)
+
+New module `node/lib/battery/battery.c`: `battery_read_mv()` +
+`battery_percent()` (rough CR2032 curve — flat ~2.8-3.0V most of its life
+then falls off a cliff, piecewise-linear between a handful of points, not a
+real fuel gauge — worth retuning once a cell's actually been watched
+declining over months). Registers `GET /battery` over CoAP, JSON response.
+
+Confirmed on the real node:
+```
+$ coap-client -m get -N "coap://[$ADDR]/battery"
+{"mv":3304,"percent":100}
+```
+Stable across repeated reads (3303-3306mV), cross-checked against the coin
+cell being fresh. 3.3V is right at the top of a fresh CR2032's nominal range
+(~3.0-3.3V open-circuit), consistent with 100%. Can also be sanity-checked
+independently with a plain multimeter across `3V3`/`GND` (or directly at the
+coin cell holder terminals) — same net, no regulator in between, so the two
+should read the same value.
+
 ### Also still true from before, unrelated to tonight
 
 Uncommitted working-tree state (not yet committed, still pending):
@@ -345,12 +373,6 @@ approach.
 
 ## Discussed but NOT yet implemented (no code written)
 
-- **Battery voltage reporting**: plan agreed (SAADC internal-reference
-  mode, periodic timer, extend the UDP announce message, update
-  `listener.py`). Given tonight's findings, sampling voltage specifically
-  right after a TX burst (not just at idle) would directly catch the
-  load-dependent sag that was the real story — worth designing it that way
-  when this gets picked up, not just periodic idle sampling.
 - **Proper Home Assistant integration** for the AC node itself (currently
   nothing beyond raw `ac.sh`/`coap-client`; HA only sees the border router,
   which is infra-level, not a device). Three options sketched, none chosen:

@@ -1,5 +1,6 @@
 #include <zephyr/kernel.h>
 
+#include "battery/battery.h"
 #include "blinky/blinky.h"
 #include "blinky_thread/blinky_thread.h"
 #include "ir/ir.h"
@@ -13,6 +14,7 @@ int main(void)
 #endif
 
 	thread_init();
+	battery_init();
 
 #if defined(CONFIG_THREAD_STATUS_LED)
 	thread_status_led_init();

@@ -14,3 +14,40 @@
 &p25q16h {
 	zephyr,pm-device-runtime-auto;
 };
+
+/*
+ * Battery voltage. This node's coin cell is wired directly to 3V3/GND (no
+ * regulator, no BQ25101 in that path) - so VDD *is* the battery voltage,
+ * measurable via the SAADC's internal VDD channel with no extra pin and no
+ * extra current draw beyond the one-shot conversion itself. (The board's
+ * own onboard divider circuit on P0.14/P0.31 taps VBAT - the charge IC's
+ * input net - which is unconnected in this wiring, so that path doesn't
+ * apply here.) Config mirrors Zephyr's own adc_dt sample
+ * (samples/drivers/adc/adc_dt/boards/nrf52840dk_nrf52840.overlay,
+ * channel@1): internal 0.6V reference + 1/6 gain = 3.6V full scale, well
+ * above a fresh CR2032's ~3.3V and comfortably covering its full discharge
+ * range. See node/lib/battery/battery.c.
+ */
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
+/ {
+	zephyr,user {
+		io-channels = <&adc 1>;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_VDD>;
+		zephyr,resolution = <14>;
+		zephyr,oversampling = <8>;
+	};
+};

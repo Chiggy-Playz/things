@@ -8,6 +8,7 @@ target_include_directories(app PRIVATE lib)
 target_sources(app PRIVATE
     src/main.c
     lib/thread/thread.c
+    lib/battery/battery.c
 )
 target_sources_ifdef(CONFIG_BLINKY app PRIVATE lib/blinky/blinky.c)
 target_sources_ifdef(CONFIG_THREAD_STATUS_LED app PRIVATE lib/thread_status_led/thread_status_led.c)
