@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- flat, single-color mesh of nodes - one filled (this device), rest outline (mesh peers) -->
+  <g fill="none" stroke="#319795" stroke-width="9" stroke-linecap="round">
+    <line x1="128" y1="96" x2="70" y2="170"/>
+    <line x1="128" y1="96" x2="186" y2="170"/>
+    <line x1="70" y1="170" x2="186" y2="170"/>
+    <line x1="128" y1="96" x2="128" y2="48"/>
+  </g>
+
+  <circle cx="70" cy="170" r="16" fill="none" stroke="#319795" stroke-width="9"/>
+  <circle cx="186" cy="170" r="16" fill="none" stroke="#319795" stroke-width="9"/>
+  <circle cx="128" cy="48" r="14" fill="none" stroke="#319795" stroke-width="9"/>
+
+  <!-- this node, filled/solid - the one actually running the firmware -->
+  <circle cx="128" cy="96" r="22" fill="#319795"/>
+</svg>

@@ -31,8 +31,8 @@ async def async_setup_entry(
     """Set up the two timer number entities (only called if ac_climate is in caps)."""
     async_add_entities(
         [
-            ThingsTimerNumber(entry, "timer_on", "Timer on in"),
-            ThingsTimerNumber(entry, "timer_off", "Timer off in"),
+            ThingsTimerNumber(entry, "timer_on", "Timer on in", "mdi:timer-play-outline"),
+            ThingsTimerNumber(entry, "timer_off", "Timer off in", "mdi:timer-stop-outline"),
         ]
     )
 
@@ -48,10 +48,11 @@ class ThingsTimerNumber(NumberEntity):
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_assumed_state = True
 
-    def __init__(self, entry: ConfigEntry, kind: str, name: str) -> None:
+    def __init__(self, entry: ConfigEntry, kind: str, name: str, icon: str) -> None:
         self._entry = entry
         self._kind = kind
         self._attr_name = name
+        self._attr_icon = icon
         self._attr_unique_id = f"{entry.entry_id}_{kind}"
         self._attr_device_info = device_info_for(entry)
         self._attr_native_value = 0
