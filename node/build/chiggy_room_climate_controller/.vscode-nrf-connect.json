@@ -11,15 +11,18 @@
   "confFiles": [
     "prj.conf"
   ],
-  "buildDirectory": "build/blinky",
+  "buildDirectory": "build/chiggy_room_climate_controller",
   "kconfigFragments": [
-    "config/blinky.conf"
+    "config/chiggy_room.conf",
+    "config/climate.conf",
+    "config/voltas.conf"
   ],
   "snippets": [],
   "dtcOverlays": [
     "boards/xiao_ble_nrf52840.overlay"
   ],
   "extraDtcOverlays": [
+    "boards/ir.overlay",
     "boards/mcuboot_partitions.overlay"
   ]
 }
