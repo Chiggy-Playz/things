@@ -9,7 +9,6 @@
 #include <openthread/ip6.h>
 #include <openthread/link.h>
 #include <openthread/logging.h>
-#include <openthread/message.h>
 #include <openthread/srp_client.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/sys/printk.h>
@@ -209,68 +208,6 @@ static void start_srp_client(otInstance *instance)
 	otSrpClientEnableAutoStartMode(instance, srp_client_auto_start_cb, NULL);
 }
 
-/* ---------- CoAP endpoint: POST /stay_awake ----------
- *
- * A bulk mcumgr firmware upload would otherwise ride this node's normal
- * sleepy poll cycle (CONFIG_OPENTHREAD_POLL_PERIOD, 500ms) - indirect
- * transmission only buffers a handful of pending frames per child at the
- * parent, and a multi-fragment SMP chunk can outrun that queue long
- * before a slow poller drains it (partial 6LoWPAN reassembly, dropped
- * fragments, retries). Flipping mRxOnWhenIdle on turns this child
- * non-sleepy for as long as it's set - the parent forwards frames to it
- * immediately instead of queueing them for a poll, so the whole indirect-
- * transmission queue problem doesn't apply during the transfer.
- *
- * No explicit "go back to sleep" is needed in the normal flow: this is a
- * runtime-only link mode change, never persisted, so the reboot that
- * `mcumgr reset` triggers to swap the new image in resets it to the
- * sleepy default on its own. {"awake":false} exists for the abort path -
- * putting the node back to sleep by hand if an update is cancelled
- * before ever reaching that reboot.
- */
-static otCoapResource stay_awake_resource;
-
-static void set_rx_on_when_idle(otInstance *instance, bool on)
-{
-	otLinkModeConfig mode = otThreadGetLinkMode(instance);
-
-	mode.mRxOnWhenIdle = on;
-	otThreadSetLinkMode(instance, mode);
-	printk("Thread: rx-on-when-idle -> %s\n", on ? "true (awake)" : "false (sleepy)");
-}
-
-static void stay_awake_coap_handler(void *ctx, otMessage *msg, const otMessageInfo *msg_info)
-{
-	ARG_UNUSED(ctx);
-
-	if (otCoapMessageGetCode(msg) != OT_COAP_CODE_POST) {
-		return;
-	}
-
-	char buf[32] = {0};
-	uint16_t offset = otMessageGetOffset(msg);
-	uint16_t len = otMessageGetLength(msg) - offset;
-
-	if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-	otMessageRead(msg, offset, buf, len);
-	buf[len] = '\0';
-
-	otInstance *instance = openthread_get_default_instance();
-
-	set_rx_on_when_idle(instance, strstr(buf, "\"awake\":true") != NULL);
-
-	if (otCoapMessageGetType(msg) == OT_COAP_TYPE_CONFIRMABLE) {
-		otMessage *resp = otCoapNewMessage(instance, NULL);
-		if (!resp) return;
-
-		otError err = otCoapMessageInitResponse(resp, msg,
-				  OT_COAP_TYPE_ACKNOWLEDGMENT, OT_COAP_CODE_CHANGED);
-		if (err != OT_ERROR_NONE || otCoapSendResponse(instance, resp, msg_info) != OT_ERROR_NONE) {
-			otMessageFree(resp);
-		}
-	}
-}
-
 int thread_init(void)
 {
 	otInstance *instance = openthread_get_default_instance();
@@ -282,12 +219,6 @@ int thread_init(void)
 	otSetStateChangedCallback(instance, on_thread_state_changed, NULL);
 
 	otCoapStart(instance, OT_DEFAULT_COAP_PORT);
-
-	stay_awake_resource.mUriPath = "stay_awake";
-	stay_awake_resource.mHandler = stay_awake_coap_handler;
-	stay_awake_resource.mContext = NULL;
-	stay_awake_resource.mNext = NULL;
-	otCoapAddResource(instance, &stay_awake_resource);
 
 	start_srp_client(instance);
 
