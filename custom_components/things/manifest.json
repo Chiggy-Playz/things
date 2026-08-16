@@ -1,0 +1,18 @@
+{
+  "domain": "things",
+  "name": "Things",
+  "codeowners": ["@Chiggy-Playz"],
+  "config_flow": true,
+  "documentation": "https://github.com/Chiggy-Playz/things",
+  "iot_class": "local_polling",
+  "requirements": ["aiocoap>=0.4.7"],
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_coap._udp.local.",
+      "properties": {
+        "caps": "*"
+      }
+    }
+  ]
+}

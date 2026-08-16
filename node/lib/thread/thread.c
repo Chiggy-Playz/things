@@ -2,6 +2,7 @@
 #include <zephyr/net/openthread.h>
 #include <openthread/coap.h>
 #include <openthread/dataset.h>
+#include <openthread/dns.h>
 #include <openthread/error.h>
 #include <openthread/instance.h>
 #include <openthread/thread.h>
@@ -160,6 +161,19 @@ static void srp_client_auto_start_cb(const otSockAddr *server_addr, void *ctx)
 	       server_addr ? "started" : "stopped", srp_hostname);
 }
 
+/* Advertises what this node actually supports, so a generic Home Assistant
+ * integration can discover it via zeroconf and create the right entities
+ * without any per-node-type integration code. A single "caps" key, since a
+ * node can have more than one capability (e.g. a future board mixing a PIR
+ * with a temp/humidity sensor) - see CONFIG_THING_CAPS's help text. Empty
+ * string is still a valid (zero-length) TXT value if CONFIG_THING_CAPS is
+ * unset for a given build variant. */
+static const otDnsTxtEntry caps_txt_entry = {
+	.mKey = "caps",
+	.mValue = (const uint8_t *)CONFIG_THING_CAPS,
+	.mValueLength = sizeof(CONFIG_THING_CAPS) - 1, /* exclude the NUL */
+};
+
 /* SRP client only ever sends an "SRP Update" once a host name, a host
  * address, AND at least one service are all set - otherwise it sits
  * "started" forever without ever transmitting anything. This service
@@ -170,6 +184,8 @@ static otSrpClientService coap_service = {
 	.mName = "_coap._udp",
 	.mInstanceName = srp_hostname,
 	.mPort = OT_DEFAULT_COAP_PORT,
+	.mTxtEntries = &caps_txt_entry,
+	.mNumTxtEntries = 1,
 };
 
 static void srp_client_callback(otError error, const otSrpClientHostInfo *host_info,

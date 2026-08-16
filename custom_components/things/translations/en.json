@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a Things node manually",
+        "description": "Only needed if discovery didn't find it automatically - the node has to be attached to Thread and SRP-registered first.",
+        "data": {
+          "host": "Hostname or IPv6 address",
+          "caps": "Capabilities this node has"
+        }
+      },
+      "discovery_confirm": {
+        "title": "Add discovered Things node",
+        "description": "Found \"{name}\", advertising: {caps}. Add it?"
+      }
+    },
+    "abort": {
+      "already_configured": "This node is already configured."
+    },
+    "error": {
+      "cannot_connect": "Could not reach the node - check it's attached and the hostname/address is right."
+    }
+  }
+}

@@ -26,6 +26,19 @@ config THREAD_ANNOUNCE_PORT
 	int "UDP port for address announce"
 	default 5555
 
+config THING_CAPS
+	string "Capability set advertised in the SRP service's TXT record"
+	default ""
+	help
+	  Comma-separated capability tags (e.g. "ac_climate,battery"),
+	  published as a single "caps" key in the _coap._udp SRP service's
+	  TXT record. Lets a generic Home Assistant integration discover
+	  what a given node actually supports and create the matching
+	  entities - a node can declare more than one (e.g. a future board
+	  mixing a PIR with a temp/humidity sensor: "pir,temp,humidity").
+	  Set per build variant's conf fragment, not here - "" means no
+	  capability declared.
+
 config THREAD_STATUS_LED
 	bool "RGB LED indicates Thread attach status"
 	default y
