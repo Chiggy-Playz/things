@@ -14,7 +14,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_HOST, CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig
 
@@ -76,10 +76,17 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manual fallback - capabilities have to be told to us, not read
-        from a TXT record we never saw."""
+        from a TXT record we never saw.
+
+        Unique ID is the node's SRP hostname (same identity zeroconf uses),
+        not the host/address - otherwise a manually-added entry and its
+        zeroconf discovery never recognize each other as the same node, and
+        the discovered card keeps coming back even after being added.
+        """
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            name = user_input[CONF_NAME]
             host = user_input[CONF_HOST]
 
             client = await ThingsApiClient.create(host)
@@ -95,10 +102,10 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await client.close()
 
             if not errors:
-                await self.async_set_unique_id(host)
-                self._abort_if_unique_id_configured()
+                await self.async_set_unique_id(name)
+                self._abort_if_unique_id_configured(updates={CONF_HOST: host})
                 return self.async_create_entry(
-                    title=host,
+                    title=name,
                     data={CONF_HOST: host, CONF_CAPS: user_input[CONF_CAPS]},
                 )
 
@@ -106,6 +113,7 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
+                    vol.Required(CONF_NAME): str,
                     vol.Required(CONF_HOST): str,
                     vol.Required(CONF_CAPS, default=[]): SelectSelector(
                         SelectSelectorConfig(options=KNOWN_CAPS, multiple=True)
