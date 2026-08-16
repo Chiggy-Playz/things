@@ -1,6 +1,8 @@
 # Project status — read this first in a new session
 
-Last updated: 2026-08-16 (early morning, continued from the night session).
+Last updated: 2026-08-17 (MCUboot/OTA attempted and abandoned same night —
+see that section first, it's the most recent thing that happened to the
+node and reverses real code that was briefly committed).
 Supersedes the 2026-08-11 version entirely
 — that session's active problem is resolved, and the architecture described
 there (standalone `ot_br`) is no longer what's running. Trust this over
@@ -17,6 +19,124 @@ Wireless, coin-cell-powered IR blaster nodes (nRF52840/Zephyr) controlling
 ACs via Home Assistant over Thread. Two AC IR dialects supported: Voltas,
 Teco. One node currently deployed for real: hostname
 `chiggy-room-climate`, controls a Voltas AC in Chiggy's room.
+
+## MCUboot / wireless OTA — attempted 2026-08-16/17, ABANDONED, fully reverted
+
+**Current state of the node's firmware/bootloader as a result: back to
+plain single-image SWD flashing, no MCUboot, exactly like before this was
+ever tried.** The code is reverted (see below); the physical node still has
+MCUboot on it from the SWD flash done during this attempt, and needs the
+factory Adafruit bootloader reflashed via SWD to fully match the reverted
+code again — **planned, not yet done as of this writing.**
+
+**Goal**: stop needing physical SWD access (Pi Pico + hand-held wires) for
+every firmware update, by adding MCUboot + Zephyr's `mcumgr` subsystem so
+new firmware could be pushed wirelessly over the existing Thread mesh
+(UDP/CoAP-framed SMP, port 1337) instead.
+
+**What got built and was genuinely build-verified** (real `west build
+--sysbuild` runs against the actual toolchain at `/opt/nordic/ncs/v3.4.0`,
+not just written and assumed correct):
+- A from-scratch MCUboot-ready flash layout (`node/boards/mcuboot_partitions.overlay`)
+  replacing the board's factory-Adafruit-bootloader-shaped layout: MCUboot
+  48KB @ 0x0, two 472KB app slots (swap-with-revert), 32KB storage.
+- Sysbuild wiring (`node/sysbuild.conf`, `node/sysbuild/mcuboot.{conf,overlay}`)
+  to actually build the two-image (mcuboot + app) bundle.
+- mcumgr over UDP (`CONFIG_MCUMGR_TRANSPORT_UDP`, image + OS management
+  groups) in `prj.conf`.
+- A `POST /stay_awake` CoAP endpoint (`node/lib/thread/thread.c`) that flips
+  `mRxOnWhenIdle` via `otThreadSetLinkMode()` so a bulk image upload doesn't
+  ride the node's normal 500ms sleepy-poll cycle (indirect-transmission
+  queueing at the parent can't keep up with a multi-fragment SMP chunk
+  otherwise).
+- `node/tools/ota.py` — a Python client (`smpclient`, pulled in via
+  `uv run --with smpclient`) to drive upload/list/test/reset/confirm, since
+  neither obvious mcumgr client actually fit: `nrfutil mcu-manager` (bundled
+  with the same NCS toolchain) only speaks serial/BLE, no UDP at all: and
+  the Apache `mcumgr` CLI needs a Go toolchain and turned out to be pinned
+  to a **2020-era snapshot** of the library that actually implements UDP
+  (checked its `go.mod` directly), despite that library itself being
+  actively maintained today.
+
+**The actual SWD flash worked and was verified on real hardware**: both
+images programmed and verified OK via openocd (Pico as CMSIS-DAP probe,
+same physical setup as every prior flash), addresses matching the designed
+partition layout exactly (checked the openocd log's own erase-range output
+against the known binary sizes). Node booted, rejoined Thread, SRP-registered
+— confirmed via `dns-sd -Z _coap._udp local.` showing the `caps` TXT record
+and via `ot-ctl child table`/`ot-ctl srp server host` on iris directly.
+
+**Real bugs hit and fixed along the way, in case any of this is revisited:**
+1. **Thread attach flakiness right after the fresh flash** (10-15 restarts
+   needed, "flashing red" for a long time) — root-caused via a live
+   `journalctl -u otbr-agent -f` capture on iris during an actual attach
+   attempt: RSSI -99dBm / very low LQI, plus a `Frame rx failed,
+   error:UnknownNeighbor` (stale short-address from a session iris had
+   already evicted). Turned out to be transient — moving the node around
+   and re-testing showed instant clean attach in the exact same "bad" spot
+   afterward, so this was a one-off, not a standing RF or code issue.
+2. **SRP registration stuck on "deleted: true" indefinitely** even with
+   Thread cleanly attached — `journalctl -u otbr-agent` showed the node
+   *retrying every few seconds* and iris's SRP server rejecting every
+   attempt (`Name conflict: host name ... already allocated`,
+   `Failed to Process DNS Update section - Duplicated`). Root cause: this
+   app has no persisted SRP client key (no `CONFIG_SETTINGS`), so a fresh
+   boot after the earlier flaky session couldn't prove ownership of the
+   still-key-leased hostname reservation from before. Fixed *on iris*, not
+   the node: `sudo ot-ctl srp server disable` then `enable` cleared the
+   stale record; the node's next retry (it never stopped trying) registered
+   cleanly. Worth persisting-key-across-reboots as a real fix if SRP/mcumgr
+   work is ever revisited — this will recur any time a session dies
+   abruptly instead of cleanly deregistering.
+3. **`ota.py upload` — three separate real client-side bugs**, each
+   confirmed via the actual error before being fixed:
+   - `SMPUDPTransport(mtu=1500)` — too large for the real path; macOS
+     itself refused to send the first chunk (`OSError(40, "Message too
+     long")`) before it even left the sending machine. Lowered to 1200.
+   - `client.upload_file()` — goes through SMP group 8 (file management,
+     `fs_mgmt`), which this firmware never enabled (`ENOTSUP`). The actual
+     firmware-image path is `client.upload()` (group 1, image management,
+     `ImageUploadWrite`) — a wrong-API-choice bug, not a config problem.
+   - `client.upload()`'s *first* chunk gets a generous 40s default timeout,
+     but *subsequent* chunks silently inherit the client's general-purpose
+     2.5s timeout — too tight for a real Thread round trip. Passed an
+     explicit generous timeout for every chunk.
+4. **Unresolved: after all three fixes above, upload chunk 1 succeeds
+   (confirmed: device echoed back the correct offset), then chunk 2 gets
+   zero response, ever — not slow, genuinely nothing.** At that point *every*
+   CoAP handler stopped responding (`/battery`, totally unrelated to
+   img_mgmt, also went dead), and the node dropped off Thread's child table
+   entirely within ~2 minutes, with no self-recovery. Power/brownout was a
+   live theory (this node has documented battery fragility elsewhere in
+   this doc, and `stay_awake`'s continuous-RX mode draws more current right
+   when a flash write is also happening) — **ruled out**: reproduced
+   identically while the node was on stable Mac USB power, not the coin
+   cell. Root cause never found; would need console access (currently
+   compiled out entirely) or a debugger attached to actually diagnose.
+   A manual power cycle was required to recover the node each time this
+   happened.
+
+**Decision: abandoned as not worth the debugging cost**, not because
+MCUboot/mcumgr are fundamentally wrong for this project — most of the pain
+above was either transient (attach flakiness), infra-side (the SRP
+key-lease bug, fixable on iris), or straightforward client bugs (all three
+`ota.py` issues, all fixed). The one genuinely open question is the chunk-2
+hang, which is a real unexplained firmware issue, not something either side
+of this session could resolve without hardware debug access.
+
+**Reverted, verified byte-for-byte**: `git revert --no-commit` of both
+MCUboot-related commits (`a4d25da "Add MCUBoot"`, `e871af7 "More mcuboot
+stuff"`), left staged/uncommitted (never run `git commit` without being
+asked). Verified with `git diff b4e0583 --stat` (the last pre-MCUboot
+commit) returning **completely empty** for the whole repo, not just
+`node/` — the working tree is a byte-for-byte match for the pre-attempt
+state. History itself still shows the two commits (already pushed to
+`origin/main`; rewriting that needs a force-push, deliberately not done),
+but the code any future session sees is fully reverted.
+
+**Next physical step (not yet done)**: reflash the factory Adafruit
+bootloader back onto the node via SWD, to match the reverted code (which no
+longer expects MCUboot's partition layout at all).
 
 ## Current architecture (as of 2026-08-16 — changed completely since 08-11, don't assume the old docs)
 
