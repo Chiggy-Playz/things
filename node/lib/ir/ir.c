@@ -84,10 +84,38 @@ void ir_send_command(ir_cmd_t cmd, const ir_params_t *params)
 
 static otCoapResource ir_resource;
 
+static bool json_bool_field(const char *buf, const char *field)
+{
+	const char *v = strstr(buf, field);
+	if (!v) return false;
+	v = strchr(v, ':');
+	return v && strstr(v, "true") != NULL;
+}
+
+static ir_mode_t parse_mode(const char *v)
+{
+	if (strstr(v, "cool")) return IR_MODE_COOL;
+	if (strstr(v, "dry"))  return IR_MODE_DRY;
+	if (strstr(v, "fan"))  return IR_MODE_FAN;
+	return IR_MODE_AUTO;
+}
+
+static ir_fan_t parse_fan(const char *v)
+{
+	if (strstr(v, "low"))  return IR_FAN_LOW;
+	if (strstr(v, "med"))  return IR_FAN_MED;
+	if (strstr(v, "high")) return IR_FAN_HIGH;
+	return IR_FAN_AUTO;
+}
+
 static void parse_and_dispatch(const char *buf)
 {
-	ir_params_t p = { .temp = 24, .swing_h = false,
-			  .timer_on_mins = 0, .timer_off_mins = 0 };
+	ir_params_t p = {
+		.temp = 24, .mode = IR_MODE_COOL, .fan = IR_FAN_AUTO,
+		.swing_h = false, .swing_v = false, .turbo = false,
+		.sleep = false, .eco = false, .light = false, .humid = false,
+		.timer_on_mins = 0, .timer_off_mins = 0,
+	};
 	const char *v;
 
 	if (strstr(buf, "power_on")) {
@@ -101,13 +129,35 @@ static void parse_and_dispatch(const char *buf)
 			if (v) p.temp = (uint8_t)strtol(v + 1, NULL, 10);
 		}
 		ir_send_command(IR_CMD_SET_TEMP, &p);
+	} else if (strstr(buf, "set_mode")) {
+		v = strstr(buf, "\"mode\"");
+		if (v) p.mode = parse_mode(v);
+		ir_send_command(IR_CMD_SET_MODE, &p);
+	} else if (strstr(buf, "set_fan")) {
+		v = strstr(buf, "\"fan\"");
+		if (v) p.fan = parse_fan(v);
+		ir_send_command(IR_CMD_SET_FAN, &p);
+	} else if (strstr(buf, "set_swing_v")) {
+		p.swing_v = json_bool_field(buf, "\"swing\"");
+		ir_send_command(IR_CMD_SET_SWING_V, &p);
 	} else if (strstr(buf, "set_swing")) {
-		v = strstr(buf, "\"swing\"");
-		if (v) {
-			v = strchr(v, ':');
-			if (v) p.swing_h = (strstr(v, "true") != NULL);
-		}
+		p.swing_h = json_bool_field(buf, "\"swing\"");
 		ir_send_command(IR_CMD_SET_SWING_H, &p);
+	} else if (strstr(buf, "set_turbo")) {
+		p.turbo = json_bool_field(buf, "\"on\"");
+		ir_send_command(IR_CMD_SET_TURBO, &p);
+	} else if (strstr(buf, "set_sleep")) {
+		p.sleep = json_bool_field(buf, "\"on\"");
+		ir_send_command(IR_CMD_SET_SLEEP, &p);
+	} else if (strstr(buf, "set_eco")) {
+		p.eco = json_bool_field(buf, "\"on\"");
+		ir_send_command(IR_CMD_SET_ECO, &p);
+	} else if (strstr(buf, "set_light")) {
+		p.light = json_bool_field(buf, "\"on\"");
+		ir_send_command(IR_CMD_SET_LIGHT, &p);
+	} else if (strstr(buf, "set_humid")) {
+		p.humid = json_bool_field(buf, "\"on\"");
+		ir_send_command(IR_CMD_SET_HUMID, &p);
 	} else if (strstr(buf, "set_timer_on")) {
 		v = strstr(buf, "\"mins\"");
 		if (v) {
