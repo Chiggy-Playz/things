@@ -12,6 +12,7 @@
 #include <openthread/srp_client.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -167,11 +168,23 @@ static void srp_client_auto_start_cb(const otSockAddr *server_addr, void *ctx)
  * node can have more than one capability (e.g. a future board mixing a PIR
  * with a temp/humidity sensor) - see CONFIG_THING_CAPS's help text. Empty
  * string is still a valid (zero-length) TXT value if CONFIG_THING_CAPS is
- * unset for a given build variant. */
-static const otDnsTxtEntry caps_txt_entry = {
-	.mKey = "caps",
-	.mValue = (const uint8_t *)CONFIG_THING_CAPS,
-	.mValueLength = sizeof(CONFIG_THING_CAPS) - 1, /* exclude the NUL */
+ * unset for a given build variant.
+ *
+ * "config" is deliberately a separate key from "caps" - caps says which
+ * entity platforms a node needs, config says how an already-declared
+ * capability should behave for this specific physical unit (see
+ * CONFIG_THING_CONFIG's help text). */
+static const otDnsTxtEntry node_txt_entries[] = {
+	{
+		.mKey = "caps",
+		.mValue = (const uint8_t *)CONFIG_THING_CAPS,
+		.mValueLength = sizeof(CONFIG_THING_CAPS) - 1, /* exclude the NUL */
+	},
+	{
+		.mKey = "config",
+		.mValue = (const uint8_t *)CONFIG_THING_CONFIG,
+		.mValueLength = sizeof(CONFIG_THING_CONFIG) - 1,
+	},
 };
 
 /* SRP client only ever sends an "SRP Update" once a host name, a host
@@ -184,9 +197,57 @@ static otSrpClientService coap_service = {
 	.mName = "_coap._udp",
 	.mInstanceName = srp_hostname,
 	.mPort = OT_DEFAULT_COAP_PORT,
-	.mTxtEntries = &caps_txt_entry,
-	.mNumTxtEntries = 1,
+	.mTxtEntries = node_txt_entries,
+	.mNumTxtEntries = ARRAY_SIZE(node_txt_entries),
 };
+
+/* GET /caps - lets a manual HA config flow (which never saw the SRP TXT
+ * record, since discovery is precisely what didn't happen) ask a
+ * known-reachable node what it supports instead of making the user
+ * hand-retype whatever was compiled into CONFIG_THING_CAPS/THING_CONFIG. */
+static otCoapResource caps_resource;
+
+static void caps_coap_handler(void *ctx, otMessage *msg, const otMessageInfo *msg_info)
+{
+	ARG_UNUSED(ctx);
+
+	if (otCoapMessageGetCode(msg) != OT_COAP_CODE_GET) {
+		return;
+	}
+
+	otInstance *instance = openthread_get_default_instance();
+	otMessage *resp = otCoapNewMessage(instance, NULL);
+
+	if (!resp) {
+		return;
+	}
+
+	otCoapType resp_type = (otCoapMessageGetType(msg) == OT_COAP_TYPE_CONFIRMABLE)
+					? OT_COAP_TYPE_ACKNOWLEDGMENT
+					: OT_COAP_TYPE_NON_CONFIRMABLE;
+
+	if (otCoapMessageInitResponse(resp, msg, resp_type, OT_COAP_CODE_CONTENT) !=
+	    OT_ERROR_NONE) {
+		otMessageFree(resp);
+		return;
+	}
+
+	otCoapMessageAppendContentFormatOption(resp, OT_COAP_OPTION_CONTENT_FORMAT_JSON);
+	otCoapMessageSetPayloadMarker(resp);
+
+	char body[160];
+	int len = snprintf(body, sizeof(body), "{\"caps\":\"%s\",\"config\":\"%s\"}",
+			    CONFIG_THING_CAPS, CONFIG_THING_CONFIG);
+
+	if (otMessageAppend(resp, body, (uint16_t)len) != OT_ERROR_NONE) {
+		otMessageFree(resp);
+		return;
+	}
+
+	if (otCoapSendResponse(instance, resp, msg_info) != OT_ERROR_NONE) {
+		otMessageFree(resp);
+	}
+}
 
 static void srp_client_callback(otError error, const otSrpClientHostInfo *host_info,
 				 const otSrpClientService *services,
@@ -240,7 +301,13 @@ int thread_init(void)
 	 */
 	openthread_run();
 
-	printk("Thread: started, CoAP on port %d\n", OT_DEFAULT_COAP_PORT);
+	caps_resource.mUriPath = "caps";
+	caps_resource.mHandler = caps_coap_handler;
+	caps_resource.mContext = NULL;
+	caps_resource.mNext = NULL;
+	thread_coap_add_resource(&caps_resource);
+
+	printk("Thread: started, CoAP on port %d, /caps registered\n", OT_DEFAULT_COAP_PORT);
 	return 0;
 }
 

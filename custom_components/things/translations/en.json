@@ -3,11 +3,24 @@
     "step": {
       "user": {
         "title": "Add a Things node manually",
-        "description": "Only needed if discovery didn't find it automatically - the node has to be attached to Thread and SRP-registered first.",
+        "description": "Only needed if discovery didn't find it automatically - the node has to be attached to Thread and SRP-registered first. Capabilities are chosen on the next page.",
         "data": {
           "name": "Node name (must match its SRP hostname, e.g. \"chiggy-room-climate\")",
-          "host": "Hostname or IPv6 address",
+          "host": "Hostname or IPv6 address"
+        }
+      },
+      "capabilities": {
+        "title": "Choose capabilities",
+        "description": "{detected}",
+        "data": {
           "caps": "Capabilities this node has"
+        }
+      },
+      "swing_axis": {
+        "title": "Swing axis",
+        "description": "This node has AC/climate control - which physical swing axis does the unit actually have a motor for? A unit only ever has one working axis, even if its IR protocol technically supports both.",
+        "data": {
+          "swing": "Swing axis"
         }
       },
       "discovery_confirm": {
@@ -17,9 +30,20 @@
     },
     "abort": {
       "already_configured": "This node is already configured."
+    }
+  },
+  "selector": {
+    "thing_caps": {
+      "options": {
+        "ac_climate": "AC / climate control",
+        "battery": "Battery level sensor"
+      }
     },
-    "error": {
-      "cannot_connect": "Could not reach the node - check it's attached and the hostname/address is right."
+    "swing_axis": {
+      "options": {
+        "h": "Horizontal",
+        "v": "Vertical"
+      }
     }
   }
 }

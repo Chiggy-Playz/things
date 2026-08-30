@@ -39,6 +39,20 @@ config THING_CAPS
 	  Set per build variant's conf fragment, not here - "" means no
 	  capability declared.
 
+config THING_CONFIG
+	string "Extra per-node config, advertised in the SRP service's TXT record"
+	default ""
+	help
+	  Comma-separated key=value pairs (e.g. "swing=v"), published as a
+	  "config" key in the _coap._udp SRP service's TXT record - separate
+	  from CONFIG_THING_CAPS on purpose: caps says which entity platforms
+	  a node needs (drives PLATFORMS_BY_CAP on the HA side), this says how
+	  an already-declared capability should behave for this specific
+	  physical unit (e.g. which swing axis a real motor exists for, since
+	  two nodes can both declare "ac_climate" but only one has a vertical
+	  swing motor and the other only horizontal). Set per build variant's
+	  conf fragment, not here - "" means no extra config.
+
 config THREAD_STATUS_LED
 	bool "RGB LED indicates Thread attach status"
 	default y

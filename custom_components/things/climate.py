@@ -25,6 +25,7 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import CONF_NODE_CONFIG, CONF_SWING_AXIS, SWING_AXIS_V
 from .device import device_info_for
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,12 +72,26 @@ class ThingsClimate(ClimateEntity):
     def _client(self):
         return self._entry.runtime_data.client
 
+    @property
+    def _swing_cmd(self) -> str:
+        """Which physical swing axis this node's own remote actually has a
+        motor for - a split unit and a window unit can both declare
+        ac_climate but only one axis is ever real per unit (see
+        config_flow.py's swing_axis step). Defaults to the horizontal
+        command for nodes with no node_config at all, matching this
+        integration's original (pre-swing-axis) behavior."""
+        axis = self._entry.data.get(CONF_NODE_CONFIG, {}).get(CONF_SWING_AXIS)
+        return "set_swing_v" if axis == SWING_AXIS_V else "set_swing"
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Turn the AC on/off.
 
-        power_on resets the unit to a hardcoded default state on the
-        firmware side (voltas_default_on in voltas.c) - re-assert whatever
-        HA last had set right after, so the two don't silently drift apart.
+        The node's own IR state buffer persists across commands (see
+        voltas.c/teco.c) - power is just one bit, everything else (temp,
+        swing) is preserved automatically. Still re-assert temp/swing here
+        so a fresh node (nothing sent since its own last boot) comes up
+        matching whatever HA already shows, not the firmware's own reset
+        defaults.
         """
         if hvac_mode == HVACMode.OFF:
             await self._client.send_ir_command("power_off")
@@ -86,7 +101,7 @@ class ThingsClimate(ClimateEntity):
                 "set_temp", temp=int(self._attr_target_temperature)
             )
             await self._client.send_ir_command(
-                "set_swing", swing=self._attr_swing_mode == "on"
+                self._swing_cmd, swing=self._attr_swing_mode == "on"
             )
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
@@ -100,6 +115,6 @@ class ThingsClimate(ClimateEntity):
         self.async_write_ha_state()
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        await self._client.send_ir_command("set_swing", swing=swing_mode == "on")
+        await self._client.send_ir_command(self._swing_cmd, swing=swing_mode == "on")
         self._attr_swing_mode = swing_mode
         self.async_write_ha_state()

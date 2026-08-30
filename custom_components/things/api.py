@@ -1,13 +1,15 @@
 """Minimal async CoAP client for a single Things node.
 
-Matches the endpoints the firmware actually exposes (see node/lib/ir/ir.c
-and node/lib/battery/battery.c) - no more, no less:
+Matches the endpoints the firmware actually exposes (see node/lib/ir/ir.c,
+node/lib/battery/battery.c and node/lib/thread/thread.c) - no more, no less:
   - GET  /battery -> {"mv": int, "percent": int}
+  - GET  /caps    -> {"caps": "<comma tags>", "config": "<comma k=v pairs>"}
   - POST /ir      -> {"cmd": "<name>", ...fields}, fire-and-forget
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -15,6 +17,13 @@ from typing import Any
 import aiocoap
 
 _LOGGER = logging.getLogger(__name__)
+
+# aiocoap has no default timeout of its own - without this, a request to an
+# unreachable node (wrong host, node powered off, Thread mesh down) just
+# hangs until HA's own ~10min config-entry-setup timeout kills it, which is
+# exactly what caused tonight's "stuck, can't connect" incident. Every
+# _request() call goes through this now.
+REQUEST_TIMEOUT_S = 10
 
 
 class ThingsApiError(Exception):
@@ -43,7 +52,14 @@ class ThingsApiClient:
             code=code, uri=f"coap://[{self._host}]/{path}", payload=payload
         )
         try:
-            response = await self._protocol.request(request).response
+            response = await asyncio.wait_for(
+                self._protocol.request(request).response, timeout=REQUEST_TIMEOUT_S
+            )
+        except TimeoutError as err:
+            raise ThingsApiError(
+                f"CoAP request to [{self._host}]/{path} timed out after "
+                f"{REQUEST_TIMEOUT_S}s"
+            ) from err
         except Exception as err:  # aiocoap mixes its own + plain socket errors
             raise ThingsApiError(
                 f"CoAP request to [{self._host}]/{path} failed: {err}"
@@ -59,6 +75,13 @@ class ThingsApiClient:
     async def get_battery(self) -> dict:
         """GET /battery."""
         payload = await self._request(aiocoap.GET, "battery")
+        return json.loads(payload)
+
+    async def get_caps(self) -> dict:
+        """GET /caps -> {"caps": "...", "config": "..."} (same raw strings
+        the SRP TXT record carries). Used by the manual config flow to
+        auto-detect a node's capabilities instead of requiring hand-typing."""
+        payload = await self._request(aiocoap.GET, "caps")
         return json.loads(payload)
 
     async def send_ir_command(self, cmd: str, **fields: Any) -> None:

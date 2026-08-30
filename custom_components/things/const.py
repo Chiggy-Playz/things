@@ -18,6 +18,35 @@ CAP_BATTERY = "battery"
 
 KNOWN_CAPS = [CAP_AC_CLIMATE, CAP_BATTERY]
 
+# Separate from CONF_CAPS on purpose - caps says which entity platforms a
+# node needs, node_config says how an already-declared capability should
+# behave for THIS physical unit (e.g. which swing axis has a real motor).
+# Parsed from the "config" TXT key (node/Kconfig's THING_CONFIG option) -
+# same comma-separated style as "caps", but key=value pairs instead of bare
+# tags, e.g. "swing=v".
+CONF_NODE_CONFIG = "node_config"
+
+CONF_SWING_AXIS = "swing"
+SWING_AXIS_H = "h"
+SWING_AXIS_V = "v"
+KNOWN_SWING_AXES = [SWING_AXIS_H, SWING_AXIS_V]
+
+
+def parse_node_config(raw: str) -> dict[str, str]:
+    """Parse a "key=value,key=value" TXT value into a dict.
+
+    Tolerant of stray whitespace and empty segments (e.g. "" or a trailing
+    comma) since this is untrusted-ish data coming off the network.
+    """
+    result: dict[str, str] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        result[key.strip()] = value.strip()
+    return result
+
 # Which entity platforms a capability contributes. A node's forwarded
 # platforms are the union across all its declared caps.
 PLATFORMS_BY_CAP = {
