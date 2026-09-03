@@ -12,7 +12,11 @@
  *        bit  4    (unused)
  *        bits 5-7  FanSpeed (High=0b001, Med=0b010, Low=0b100, Auto=0b111)
  *   [2]  bits 0-2  SwingV  (0b111=on, 0b000=off - not a single bit)
- *        bit  3    Wifi    (not implemented - no WiFi module on this unit)
+ *        bit  3    Wifi    (real remote for this unit always transmits 1
+ *                           here despite no WiFi module - confirmed via
+ *                           real IR capture 2026-09-03, see voltas_reset
+ *                           below. Not actually a live capability flag,
+ *                           just a fixed bit on this hardware.)
  *        bit  4    (unused)
  *        bit  5    Turbo
  *        bit  6    Sleep
@@ -70,9 +74,15 @@
 #define VOLTAS_LIGHT_BIT (1U << 5)
 
 /* Reset state: Power=off, Mode=Cool, Fan=Auto, Temp=28C, swing/turbo/
- * sleep/econo/light/timers all off - checksum byte computed at build time. */
+ * sleep/econo/light/timers all off - checksum byte computed at build time.
+ * Byte[2] = 0x08 (not 0x00): bit 3 ("Wifi") - real remote captured off this
+ * unit's actual hardware always transmits this bit as 1, confirmed against
+ * a raw IR capture of a power-on press (byte[2] decoded as 0x88, i.e.
+ * Power|bit3, not just Power alone). No setter below ever touches bit 3,
+ * so baking it into the reset state is sufficient to keep it set in every
+ * frame from here on. */
 static const uint8_t voltas_reset[VOLTAS_STATE_LEN] = {
-	0x33, 0xE8, 0x00, 0x1C, 0x00, 0x00, 0x3B, 0x00, 0x00, 0x00
+	0x33, 0xE8, 0x08, 0x1C, 0x00, 0x00, 0x3B, 0x00, 0x00, 0x00
 };
 
 static uint8_t voltas_current[VOLTAS_STATE_LEN];
@@ -241,7 +251,12 @@ static void voltas_set_timer_on(uint8_t *s, uint16_t mins)
 		s[8] &= ~(1 << 7);
 		return;
 	}
-	uint16_t hrs = (mins / 60) + 1;
+	/* hrs/leftover-mins decomposition must reconstruct the true total
+	 * (hrs*60 + mins%60 == mins) - confirmed against real IR capture
+	 * 2026-09-03 across 2/11/12/13/24h selections that the nibble is
+	 * hrs%12 directly, no +1 offset (the previous (mins/60)+1 made
+	 * every timer run exactly 1 hour longer than requested). */
+	uint16_t hrs = mins / 60;
 	s[4] = (s[4] & 0x40) | (mins % 60);
 	s[4] |= ((hrs / 12) & 1) << 7;
 	s[7] = (s[7] & 0xF0) | (hrs % 12);
@@ -254,7 +269,8 @@ static void voltas_set_timer_off(uint8_t *s, uint16_t mins)
 		s[8] &= ~(1 << 6);
 		return;
 	}
-	uint16_t hrs = (mins / 60) + 1;
+	/* See voltas_set_timer_on - same off-by-one fix, same evidence. */
+	uint16_t hrs = mins / 60;
 	s[5] = (s[5] & 0x40) | (mins % 60);
 	s[5] |= ((hrs / 12) & 1) << 7;
 	s[7] = (s[7] & 0x0F) | ((hrs % 12) << 4);
@@ -312,6 +328,21 @@ static void voltas_build_state(ir_cmd_t cmd, const ir_params_t *params,
 	default:
 		printk("Voltas: unknown command %d\n", cmd);
 		return;
+	}
+
+	/* SwingHChange is a one-shot "apply this swing state now" pulse, not
+	 * a persisted setting - a real remote only asserts it in the single
+	 * frame accompanying an explicit swing button press. voltas_current
+	 * is retransmitted in full on every command though, so without this
+	 * reset, byte[0] stays stuck at "apply swing change now" on every
+	 * frame forever after the first ever swing command - confirmed via
+	 * real hardware 2026-09-03 (set_temp stopped applying at all, beep
+	 * but no change, until the node was power-cycled back to the clean
+	 * reset state) that this stuck flag was making the AC ignore *other*
+	 * fields too, not just swing. */
+	if (cmd != IR_CMD_SET_SWING_H) {
+		voltas_current[0] = (voltas_current[0] & 0x01U) |
+				     (VOLTAS_SWING_H_NO_CHANGE << 1);
 	}
 
 	voltas_current[VOLTAS_STATE_LEN - 1] = voltas_calc_checksum(voltas_current);
