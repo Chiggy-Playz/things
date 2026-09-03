@@ -25,10 +25,28 @@
  *        bits 4-5  (unused, typically 0b01)
  *        bit  6    Econo
  *        bit  7    TempSet (unused by the reference implementation either)
- *   [4]  bits 0-5  OnTimerMins   bit 6 (unused)   bit 7 OnTimer12Hr
- *   [5]  bits 0-5  OffTimerMins  bit 6 (unused)   bit 7 OffTimer12Hr
+ *   [4]  bit   0    OnTimerNot24Hr  (0 = On Timer is exactly 24h, 1 =
+ *                   otherwise - NOT part of a minutes value, despite
+ *                   IRremoteESP8266 modelling bits 0-5 as "OnTimerMins".
+ *                   Per the original reverse-engineer's own notes (GitHub
+ *                   issue #1238, distinct from - and truer than - the
+ *                   shipped C++ code) bit 0 is a dedicated 24h flag; bits
+ *                   1-6 are undocumented and never varied in any real
+ *                   capture regardless of duration (2/11/12/13/24h all
+ *                   tested 2026-09-03) - treated as fixed/reserved here,
+ *                   baked into voltas_reset instead of computed.
+ *        bits 1-6  (reserved, always 0x3B's bits 1-6 on real hardware)
+ *        bit  7    OnTimer12Hr
+ *   [5]  bit   0    OffTimerNot24Hr (same deal as byte[4] bit 0, for Off Timer)
+ *        bits 1-6  (reserved, same as byte[4])
+ *        bit  7    OffTimer12Hr
  *   [6]  constant 0x3B
- *   [7]  bits 0-3  OnTimerHrs   bits 4-7 OffTimerHrs
+ *   [7]  bits 0-3  OnTimerHrs   bits 4-7 OffTimerHrs  (hrs % 12 directly -
+ *                  NOT (hrs%60/60)+1 like IRremoteESP8266's C++ implements;
+ *                  that formula doesn't even match its own issue #1238
+ *                  notes, and real IR capture 2026-09-03 across 2/11/12/
+ *                  13/24h confirms the direct hrs%12 mapping the notes
+ *                  describe, not the shipped code's off-by-one)
  *   [8]  bits 0-4  (unused)  bit 5 Light  bit 6 OffTimerEnable  bit 7 OnTimerEnable
  *   [9]  Checksum
  *
@@ -80,9 +98,13 @@
  * a raw IR capture of a power-on press (byte[2] decoded as 0x88, i.e.
  * Power|bit3, not just Power alone). No setter below ever touches bit 3,
  * so baking it into the reset state is sufficient to keep it set in every
- * frame from here on. */
+ * frame from here on.
+ * Byte[4]/[5] = 0x3B (not 0x00): bits 1-6 are reserved/undocumented but
+ * never varied across any real capture regardless of timer duration -
+ * voltas_set_timer_on/off below only ever touch bit 0 (Not24Hr flag) and
+ * bit 7 (12Hr flag), leaving this baked-in 0x3B for the rest. */
 static const uint8_t voltas_reset[VOLTAS_STATE_LEN] = {
-	0x33, 0xE8, 0x08, 0x1C, 0x00, 0x00, 0x3B, 0x00, 0x00, 0x00
+	0x33, 0xE8, 0x08, 0x1C, 0x3B, 0x3B, 0x3B, 0x00, 0x00, 0x00
 };
 
 static uint8_t voltas_current[VOLTAS_STATE_LEN];
@@ -251,13 +273,16 @@ static void voltas_set_timer_on(uint8_t *s, uint16_t mins)
 		s[8] &= ~(1 << 7);
 		return;
 	}
-	/* hrs/leftover-mins decomposition must reconstruct the true total
-	 * (hrs*60 + mins%60 == mins) - confirmed against real IR capture
+	/* hrs = mins/60 directly (no +1) - confirmed against real IR capture
 	 * 2026-09-03 across 2/11/12/13/24h selections that the nibble is
-	 * hrs%12 directly, no +1 offset (the previous (mins/60)+1 made
-	 * every timer run exactly 1 hour longer than requested). */
+	 * hrs%12 directly, matching the original reverse-engineer's own
+	 * notes (see top-of-file comment), not IRremoteESP8266's shipped
+	 * (mins/60)+1 which made every timer run exactly 1 hour longer than
+	 * requested and doesn't match its own source documentation.
+	 * bit 0 is the Not24Hr flag (0 only when hrs==24), not a minutes
+	 * value - bits 1-6 are left alone (see voltas_reset). */
 	uint16_t hrs = mins / 60;
-	s[4] = (s[4] & 0x40) | (mins % 60);
+	s[4] = (s[4] & 0x7EU) | (hrs == 24 ? 0 : 1);
 	s[4] |= ((hrs / 12) & 1) << 7;
 	s[7] = (s[7] & 0xF0) | (hrs % 12);
 	s[8] |= (1 << 7);
@@ -269,9 +294,10 @@ static void voltas_set_timer_off(uint8_t *s, uint16_t mins)
 		s[8] &= ~(1 << 6);
 		return;
 	}
-	/* See voltas_set_timer_on - same off-by-one fix, same evidence. */
+	/* See voltas_set_timer_on - same off-by-one fix and Not24Hr-flag
+	 * correction, same evidence. */
 	uint16_t hrs = mins / 60;
-	s[5] = (s[5] & 0x40) | (mins % 60);
+	s[5] = (s[5] & 0x7EU) | (hrs == 24 ? 0 : 1);
 	s[5] |= ((hrs / 12) & 1) << 7;
 	s[7] = (s[7] & 0x0F) | ((hrs % 12) << 4);
 	s[8] |= (1 << 6);
