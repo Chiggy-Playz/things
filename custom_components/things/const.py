@@ -18,6 +18,15 @@ CAP_BATTERY = "battery"
 
 KNOWN_CAPS = [CAP_AC_CLIMATE, CAP_BATTERY]
 
+# Human-readable labels for the same tags, kept in sync with strings.json's
+# "thing_caps" selector options by hand - used anywhere caps need to be
+# shown to a user rather than matched against in code (e.g. the discovery
+# confirm dialog), so nobody has to read raw snake_case tag names.
+CAP_LABELS = {
+    CAP_AC_CLIMATE: "AC / climate control",
+    CAP_BATTERY: "Battery level sensor",
+}
+
 # Separate from CONF_CAPS on purpose - caps says which entity platforms a
 # node needs, node_config says how an already-declared capability should
 # behave for THIS physical unit (e.g. which swing axis has a real motor).

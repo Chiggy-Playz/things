@@ -25,11 +25,12 @@
       },
       "discovery_confirm": {
         "title": "Add discovered Things node",
-        "description": "Found \"{name}\", advertising: {caps}. Add it?"
+        "description": "**{name}**\n\nThis node advertises: {caps}.\n\nAdd it to Home Assistant?"
       }
     },
     "abort": {
-      "already_configured": "This node is already configured."
+      "already_configured": "This node is already configured.",
+      "reconfigure_successful": "Node updated."
     }
   },
   "selector": {

@@ -28,6 +28,7 @@ from homeassistant.helpers.selector import (
 from .api import ThingsApiClient, ThingsApiError
 from .const import (
     CAP_AC_CLIMATE,
+    CAP_LABELS,
     CONF_CAPS,
     CONF_NODE_CONFIG,
     CONF_SWING_AXIS,
@@ -52,13 +53,24 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovered_node_config: dict[str, str] = {}
 
         # Manual-entry path state, accumulated across async_step_user ->
-        # async_step_capabilities -> async_step_swing_axis.
+        # async_step_capabilities -> async_step_swing_axis. Reconfigure
+        # reuses this exact same chain (see async_step_reconfigure) rather
+        # than duplicating it, starting from async_step_capabilities
+        # instead of async_step_user since name+host are already known.
         self._manual_name: str | None = None
         self._manual_host: str | None = None
         self._manual_caps: list[str] = []
         self._manual_node_config: dict[str, str] = {}
         # Cached so async_step_swing_axis doesn't re-query the node.
         self._detected_node_config: dict[str, str] = {}
+
+        # Set only when reconfiguring an existing entry (see
+        # async_step_reconfigure) - _create_manual_entry checks this to
+        # decide between creating a new entry and updating this one in
+        # place. Also doubles as the fallback source for the capabilities
+        # form when a live /caps query fails (an unreachable node during
+        # reconfigure shouldn't blank out its already-known-good config).
+        self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_zeroconf(self, discovery_info) -> FlowResult:
         """Handle discovery via the node's SRP-registered _coap._udp service."""
@@ -97,7 +109,10 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="discovery_confirm",
             description_placeholders={
                 "name": self._discovered_name,
-                "caps": ", ".join(self._discovered_caps) or "none declared",
+                "caps": ", ".join(
+                    CAP_LABELS.get(c, c) for c in self._discovered_caps
+                )
+                or "nothing declared",
             },
         )
 
@@ -122,6 +137,22 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
         )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Entry point for the "Reconfigure" option on an existing entry.
+
+        Reuses the manual-entry capabilities -> swing_axis chain rather
+        than a separate implementation - name and host are already known,
+        so it jumps straight to capabilities and lets _create_manual_entry
+        update the existing entry instead of creating a new one.
+        """
+        entry = self._get_reconfigure_entry()
+        self._reconfigure_entry = entry
+        self._manual_name = entry.title
+        self._manual_host = entry.data[CONF_HOST]
+        return await self.async_step_capabilities()
 
     async def _detect_node(self) -> tuple[list[str], dict[str, str]]:
         """Best-effort live GET /caps against self._manual_host.
@@ -160,6 +191,14 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self._create_manual_entry()
 
         detected_caps, self._detected_node_config = await self._detect_node()
+        if not detected_caps and self._reconfigure_entry is not None:
+            # Node briefly unreachable during a reconfigure shouldn't blank
+            # out its already-known-good config - fall back to what the
+            # entry already has instead of an empty form.
+            detected_caps = self._reconfigure_entry.data.get(CONF_CAPS, [])
+            self._detected_node_config = self._reconfigure_entry.data.get(
+                CONF_NODE_CONFIG, {}
+            )
 
         return self.async_show_form(
             step_id="capabilities",
@@ -212,11 +251,15 @@ class ThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="swing_axis", data_schema=vol.Schema(schema))
 
     async def _create_manual_entry(self) -> FlowResult:
-        await self.async_set_unique_id(self._manual_name)
-        self._abort_if_unique_id_configured(updates={CONF_HOST: self._manual_host})
-
         data = {CONF_HOST: self._manual_host, CONF_CAPS: self._manual_caps}
         if self._manual_node_config:
             data[CONF_NODE_CONFIG] = self._manual_node_config
 
+        if self._reconfigure_entry is not None:
+            return self.async_update_reload_and_abort(
+                self._reconfigure_entry, data=data
+            )
+
+        await self.async_set_unique_id(self._manual_name)
+        self._abort_if_unique_id_configured(updates={CONF_HOST: self._manual_host})
         return self.async_create_entry(title=self._manual_name, data=data)
