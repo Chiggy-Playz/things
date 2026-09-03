@@ -16,14 +16,17 @@ import logging
 from typing import Any
 
 from homeassistant.components.climate import (
+    ATTR_SWING_MODE,
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_NODE_CONFIG, CONF_SWING_AXIS, SWING_AXIS_V
 from .device import device_info_for
@@ -41,8 +44,14 @@ async def async_setup_entry(
     async_add_entities([ThingsClimate(entry)])
 
 
-class ThingsClimate(ClimateEntity):
-    """Assumed-state AC control over the node's POST /ir CoAP endpoint."""
+class ThingsClimate(ClimateEntity, RestoreEntity):
+    """Assumed-state AC control over the node's POST /ir CoAP endpoint.
+
+    RestoreEntity so a HA restart doesn't forget what it last believed
+    (previously always reset to off/24C on every restart, regardless of
+    reality - see memory/PROGRESS.md, 2026-09-03). Restoring is purely
+    updating our own believed state, never re-sends an IR command - a
+    restart shouldn't make the AC beep."""
 
     _attr_has_entity_name = True
     _attr_name = None
@@ -64,9 +73,60 @@ class ThingsClimate(ClimateEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_climate"
         self._attr_device_info = device_info_for(entry)
+        # Fallback defaults if there's nothing to restore (first-ever boot
+        # of this entity) - async_added_to_hass overwrites these from the
+        # last known state whenever one exists.
         self._attr_hvac_mode = HVACMode.OFF
         self._attr_target_temperature: float = 24
         self._attr_swing_mode = "off"
+        # Cancel-callbacks for any pending timer-driven hvac_mode flip
+        # (see schedule_timer_switch) - "on" is set by the Timer On number
+        # entity, "off" by Timer Off. Lost on a HA restart (async_call_later
+        # isn't persisted) - a known, accepted gap for now, same tradeoff
+        # as the rest of this assumed-state integration.
+        self._timer_cancel: dict[str, CALLBACK_TYPE] = {}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._entry.runtime_data.climate_entity = self
+
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            return
+        if last_state.state in (HVACMode.OFF, HVACMode.COOL):
+            self._attr_hvac_mode = HVACMode(last_state.state)
+        if (temp := last_state.attributes.get(ATTR_TEMPERATURE)) is not None:
+            self._attr_target_temperature = temp
+        if (swing := last_state.attributes.get(ATTR_SWING_MODE)) is not None:
+            self._attr_swing_mode = swing
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._entry.runtime_data.climate_entity is self:
+            self._entry.runtime_data.climate_entity = None
+        for cancel in self._timer_cancel.values():
+            cancel()
+        self._timer_cancel.clear()
+
+    def schedule_timer_switch(self, kind: str, hours: float) -> None:
+        """Called by ThingsTimerNumber right after it arms a timer - flips
+        our believed hvac_mode when that timer should have fired, since we
+        have no real feedback from the AC to confirm it actually did (see
+        module docstring). kind is "timer_on" or "timer_off"; hours == 0
+        means the timer was just cleared, so only cancel any pending flip
+        for that kind rather than scheduling a new one."""
+        if cancel := self._timer_cancel.pop(kind, None):
+            cancel()
+        if hours <= 0:
+            return
+
+        target_mode = HVACMode.COOL if kind == "timer_on" else HVACMode.OFF
+
+        def _fire(_now) -> None:
+            self._timer_cancel.pop(kind, None)
+            self._attr_hvac_mode = target_mode
+            self.async_write_ha_state()
+
+        self._timer_cancel[kind] = async_call_later(self.hass, hours * 3600, _fire)
 
     @property
     def _client(self):
@@ -92,7 +152,16 @@ class ThingsClimate(ClimateEntity):
         so a fresh node (nothing sent since its own last boot) comes up
         matching whatever HA already shows, not the firmware's own reset
         defaults.
+
+        A manual mode change here supersedes any pending timer-driven flip
+        scheduled by schedule_timer_switch - without this, turning the AC
+        back on by hand before an armed Off Timer elapses would still get
+        silently flipped back to "off" later when that stale schedule fires.
         """
+        for cancel in self._timer_cancel.values():
+            cancel()
+        self._timer_cancel.clear()
+
         if hvac_mode == HVACMode.OFF:
             await self._client.send_ir_command("power_off")
         else:

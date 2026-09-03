@@ -50,10 +50,18 @@ class ThingsTimerNumber(NumberEntity):
     """One of the two AC timers, in whole hours. 0 = clear.
 
     Snaps back to 0 immediately after sending, rather than holding the set
-    value and counting down - this integration has zero real feedback from
-    the AC (see climate.py's docstring), so a simulated countdown would be
-    guessing, not tracking. Treat the slider as a momentary "arm a timer
-    for N hours now" trigger, not a persisted duration display."""
+    value and counting down on the number entity itself - this integration
+    has zero real feedback from the AC (see climate.py's docstring), so a
+    simulated countdown here would be guessing, not tracking. Treat the
+    slider as a momentary "arm a timer for N hours now" trigger, not a
+    persisted duration display.
+
+    Does still schedule a matching hvac_mode flip on the climate entity
+    (see ThingsClimate.schedule_timer_switch) for when the timer *should*
+    fire, going through entry.runtime_data.climate_entity rather than a
+    direct reference since these are two separate platforms - same
+    unverified-guess caveat applies there, just on the climate entity
+    instead of this one."""
 
     _attr_has_entity_name = True
     _attr_native_min_value = 0
@@ -76,5 +84,7 @@ class ThingsTimerNumber(NumberEntity):
         await self._entry.runtime_data.client.send_ir_command(
             f"set_{self._kind}", mins=int(value) * 60
         )
+        if climate := self._entry.runtime_data.climate_entity:
+            climate.schedule_timer_switch(self._kind, value)
         self._attr_native_value = 0
         self.async_write_ha_state()
