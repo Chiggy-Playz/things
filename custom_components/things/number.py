@@ -6,11 +6,12 @@ corresponding set_timer_on/set_timer_off command immediately (see
 node/lib/ir/ir.c), 0 clears that timer.
 
 Exposed in whole hours, not minutes: both the real Voltas remote's own UI
-and the Teco protocol's timer field only ever support whole-hour steps
-(1-24h) - see the timer investigation in memory/PROGRESS.md - so a raw
-0-1440 minute number box let you enter values the hardware can't actually
-represent. A 0-24 hour slider matches what's really selectable and is a
-much nicer control than a bare number box.
+and the Teco protocol's timer field only ever support whole-hour steps -
+see the timer investigation in memory/PROGRESS.md - so a raw 0-1440 minute
+number box let you enter values the hardware can't actually represent. A
+slider (capped at MAX_TIMER_HOURS, well under the protocol's real ceiling -
+nobody needs the full range on a slider) is a nicer control than a bare
+number box.
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ from .device import device_info_for
 
 _LOGGER = logging.getLogger(__name__)
 
-# Teco's timer field clamps to 24h (node/lib/ir/teco.c); Voltas' encoding
-# tops out in the same ballpark - use one shared ceiling for both.
-MAX_TIMER_HOURS = 24
+# Teco's timer field clamps to 24h (node/lib/ir/teco.c) and Voltas' encoding
+# tops out in the same ballpark, but in practice nobody needs the full
+# range on a slider - capped lower for a usable control.
+MAX_TIMER_HOURS = 4
 
 
 async def async_setup_entry(
@@ -45,7 +47,13 @@ async def async_setup_entry(
 
 
 class ThingsTimerNumber(NumberEntity):
-    """One of the two AC timers, in whole hours. 0 = clear."""
+    """One of the two AC timers, in whole hours. 0 = clear.
+
+    Snaps back to 0 immediately after sending, rather than holding the set
+    value and counting down - this integration has zero real feedback from
+    the AC (see climate.py's docstring), so a simulated countdown would be
+    guessing, not tracking. Treat the slider as a momentary "arm a timer
+    for N hours now" trigger, not a persisted duration display."""
 
     _attr_has_entity_name = True
     _attr_native_min_value = 0
@@ -68,5 +76,5 @@ class ThingsTimerNumber(NumberEntity):
         await self._entry.runtime_data.client.send_ir_command(
             f"set_{self._kind}", mins=int(value) * 60
         )
-        self._attr_native_value = value
+        self._attr_native_value = 0
         self.async_write_ha_state()
