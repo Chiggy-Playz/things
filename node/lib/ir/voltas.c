@@ -267,40 +267,120 @@ static void voltas_set_light(uint8_t *s, bool on)
 	}
 }
 
+/* Wall-clock deadline (k_uptime_get()-based, ms) for each timer, 0 =
+ * none armed. Exists so voltas_refresh_timers (below) can tell a stale
+ * armed-timer bit apart from a genuinely still-active one on every
+ * retransmit, instead of blindly resending whatever was last written -
+ * see voltas_refresh_timers for the bug this fixes. Naturally reset to 0
+ * on reboot along with everything else in voltas_current. */
+static int64_t on_timer_deadline_ms;
+static int64_t off_timer_deadline_ms;
+
+/* hrs = mins/60 directly (no +1) - confirmed against real IR capture
+ * 2026-09-03 across 2/11/12/13/24h selections that the nibble is hrs%12
+ * directly, matching the original reverse-engineer's own notes (see
+ * top-of-file comment), not IRremoteESP8266's shipped (mins/60)+1 which
+ * made every timer run exactly 1 hour longer than requested and doesn't
+ * match its own source documentation.
+ * bit 0 is the Not24Hr flag (0 only when hrs==24), not a minutes value -
+ * bits 1-6 are left alone (see voltas_reset). Shared by voltas_set_timer_
+ * on/off and voltas_refresh_timers so the encoding only lives in one
+ * place. */
+static void voltas_encode_timer(uint8_t *s, bool is_on, uint16_t mins)
+{
+	uint16_t hrs = mins / 60;
+	uint8_t not24hr = (hrs == 24) ? 0 : 1;
+	uint8_t twelve_hr = (hrs / 12) & 1U;
+	uint8_t hrs_nibble = hrs % 12;
+
+	if (is_on) {
+		s[4] = (uint8_t)((s[4] & 0x7EU) | not24hr | (twelve_hr << 7));
+		s[7] = (uint8_t)((s[7] & 0xF0U) | hrs_nibble);
+	} else {
+		s[5] = (uint8_t)((s[5] & 0x7EU) | not24hr | (twelve_hr << 7));
+		s[7] = (uint8_t)((s[7] & 0x0FU) | (hrs_nibble << 4));
+	}
+}
+
 static void voltas_set_timer_on(uint8_t *s, uint16_t mins)
 {
 	if (mins == 0) {
 		s[8] &= ~(1 << 7);
+		on_timer_deadline_ms = 0;
 		return;
 	}
-	/* hrs = mins/60 directly (no +1) - confirmed against real IR capture
-	 * 2026-09-03 across 2/11/12/13/24h selections that the nibble is
-	 * hrs%12 directly, matching the original reverse-engineer's own
-	 * notes (see top-of-file comment), not IRremoteESP8266's shipped
-	 * (mins/60)+1 which made every timer run exactly 1 hour longer than
-	 * requested and doesn't match its own source documentation.
-	 * bit 0 is the Not24Hr flag (0 only when hrs==24), not a minutes
-	 * value - bits 1-6 are left alone (see voltas_reset). */
-	uint16_t hrs = mins / 60;
-	s[4] = (s[4] & 0x7EU) | (hrs == 24 ? 0 : 1);
-	s[4] |= ((hrs / 12) & 1) << 7;
-	s[7] = (s[7] & 0xF0) | (hrs % 12);
+	voltas_encode_timer(s, true, mins);
 	s[8] |= (1 << 7);
+	on_timer_deadline_ms = k_uptime_get() + (int64_t)mins * 60 * 1000;
 }
 
 static void voltas_set_timer_off(uint8_t *s, uint16_t mins)
 {
 	if (mins == 0) {
 		s[8] &= ~(1 << 6);
+		off_timer_deadline_ms = 0;
 		return;
 	}
-	/* See voltas_set_timer_on - same off-by-one fix and Not24Hr-flag
-	 * correction, same evidence. */
-	uint16_t hrs = mins / 60;
-	s[5] = (s[5] & 0x7EU) | (hrs == 24 ? 0 : 1);
-	s[5] |= ((hrs / 12) & 1) << 7;
-	s[7] = (s[7] & 0x0F) | ((hrs % 12) << 4);
+	voltas_encode_timer(s, false, mins);
 	s[8] |= (1 << 6);
+	off_timer_deadline_ms = k_uptime_get() + (int64_t)mins * 60 * 1000;
+}
+
+/* Called at the top of voltas_build_state, for every command - not just
+ * timer ones. voltas_current retransmits its full state on every single
+ * frame, so without this, an armed timer's enable bit and duration bits
+ * just sit there frozen at whatever they were when armed, forever,
+ * regardless of how much real time has actually passed.
+ *
+ * Confirmed as a real bug on real hardware 2026-09-03: user's Off Timer
+ * genuinely fired on the AC (it turned off for real), but the node had
+ * no way to know that - voltas_current still had OffTimerEnable=1 with
+ * the original 1hr duration. Two unrelated commands later (power off,
+ * then power on/cool), both silently retransmitted that same stale
+ * "armed, 1hr" state, and the AC obediently re-armed a fresh 1hr timer
+ * neither the user nor the node's own logic ever intended.
+ *
+ * This is "option 3" from the original tradeoff analysis (see
+ * memory/PROGRESS.md's AC timer notes) - track elapsed wall-clock time
+ * and either clear an expired timer's enable bit, or re-encode the
+ * *actual remaining* duration, rather than the other two options
+ * (silently do nothing, or cancel the timer on any unrelated command)
+ * which were both explicitly flagged as "just different flavors of
+ * silently doing the wrong thing". */
+static void voltas_refresh_timers(uint8_t *s)
+{
+	int64_t now = k_uptime_get();
+
+	if (on_timer_deadline_ms != 0) {
+		int64_t remaining_ms = on_timer_deadline_ms - now;
+		if (remaining_ms <= 0) {
+			s[8] &= ~(1 << 7);
+			on_timer_deadline_ms = 0;
+		} else {
+			/* Round up so a still-genuinely-active timer with
+			 * under a minute left never gets reported/rounded
+			 * down to 0 (which would look "expired" to anyone
+			 * reading the frame). Sub-hour remaining behavior
+			 * isn't verified against real hardware either way -
+			 * this remote/protocol only ever arms whole hours to
+			 * begin with. */
+			uint16_t remaining_mins =
+				(uint16_t)((remaining_ms + 59999) / 60000);
+			voltas_encode_timer(s, true, remaining_mins);
+		}
+	}
+
+	if (off_timer_deadline_ms != 0) {
+		int64_t remaining_ms = off_timer_deadline_ms - now;
+		if (remaining_ms <= 0) {
+			s[8] &= ~(1 << 6);
+			off_timer_deadline_ms = 0;
+		} else {
+			uint16_t remaining_mins =
+				(uint16_t)((remaining_ms + 59999) / 60000);
+			voltas_encode_timer(s, false, remaining_mins);
+		}
+	}
 }
 
 static void voltas_build_state(ir_cmd_t cmd, const ir_params_t *params,
@@ -310,6 +390,8 @@ static void voltas_build_state(ir_cmd_t cmd, const ir_params_t *params,
 		memcpy(voltas_current, voltas_reset, VOLTAS_STATE_LEN);
 		voltas_initialized = true;
 	}
+
+	voltas_refresh_timers(voltas_current);
 
 	switch (cmd) {
 	case IR_CMD_POWER_ON:
