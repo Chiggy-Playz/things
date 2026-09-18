@@ -16,6 +16,7 @@ number box.
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -23,6 +24,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .device import device_info_for
 
@@ -50,18 +52,20 @@ class ThingsTimerNumber(NumberEntity):
     """One of the two AC timers, in whole hours. 0 = clear.
 
     Snaps back to 0 immediately after sending, rather than holding the set
-    value and counting down on the number entity itself - this integration
-    has zero real feedback from the AC (see climate.py's docstring), so a
-    simulated countdown here would be guessing, not tracking. Treat the
-    slider as a momentary "arm a timer for N hours now" trigger, not a
-    persisted duration display.
+    value and counting down on the number entity itself - a slider that's
+    also quietly ticking down on its own fights the next drag. The actual
+    "how long left" readout lives on the matching timestamp sensor instead
+    (sensor.py's ThingsTimerDeadlineSensor) - HA renders a timestamp as
+    live relative time on its own, so nothing here needs to tick. Treat
+    this slider as a momentary "arm a timer for N hours now" trigger, not
+    a persisted duration display.
 
     Does still schedule a matching hvac_mode flip on the climate entity
     (see ThingsClimate.schedule_timer_switch) for when the timer *should*
     fire, going through entry.runtime_data.climate_entity rather than a
     direct reference since these are two separate platforms - same
-    unverified-guess caveat applies there, just on the climate entity
-    instead of this one."""
+    unverified-guess caveat applies there (see climate.py's docstring), as
+    it does for the deadline this reports to the coordinator."""
 
     _attr_has_entity_name = True
     _attr_native_min_value = 0
@@ -84,6 +88,8 @@ class ThingsTimerNumber(NumberEntity):
         await self._entry.runtime_data.client.send_ir_command(
             f"set_{self._kind}", mins=int(value) * 60
         )
+        deadline = dt_util.utcnow() + timedelta(hours=value) if value > 0 else None
+        self._entry.runtime_data.set_timer_deadline(self._kind, deadline)
         if climate := self._entry.runtime_data.climate_entity:
             climate.schedule_timer_switch(self._kind, value)
         self._attr_native_value = 0

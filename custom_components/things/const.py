@@ -59,7 +59,8 @@ def parse_node_config(raw: str) -> dict[str, str]:
 # Which entity platforms a capability contributes. A node's forwarded
 # platforms are the union across all its declared caps.
 PLATFORMS_BY_CAP = {
-    CAP_AC_CLIMATE: ["climate", "number"],
+    # "sensor" too, now - see sensor.py's ThingsTimerDeadlineSensor.
+    CAP_AC_CLIMATE: ["climate", "number", "sensor"],
     CAP_BATTERY: ["sensor"],
 }
 

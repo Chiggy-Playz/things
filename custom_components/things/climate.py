@@ -103,8 +103,9 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
     async def async_will_remove_from_hass(self) -> None:
         if self._entry.runtime_data.climate_entity is self:
             self._entry.runtime_data.climate_entity = None
-        for cancel in self._timer_cancel.values():
+        for kind, cancel in self._timer_cancel.items():
             cancel()
+            self._entry.runtime_data.set_timer_deadline(kind, None)
         self._timer_cancel.clear()
 
     def schedule_timer_switch(self, kind: str, hours: float) -> None:
@@ -123,6 +124,7 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
 
         def _fire(_now) -> None:
             self._timer_cancel.pop(kind, None)
+            self._entry.runtime_data.set_timer_deadline(kind, None)
             self._attr_hvac_mode = target_mode
             self.async_write_ha_state()
 
@@ -158,8 +160,9 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
         back on by hand before an armed Off Timer elapses would still get
         silently flipped back to "off" later when that stale schedule fires.
         """
-        for cancel in self._timer_cancel.values():
+        for kind, cancel in self._timer_cancel.items():
             cancel()
+            self._entry.runtime_data.set_timer_deadline(kind, None)
         self._timer_cancel.clear()
 
         if hvac_mode == HVACMode.OFF:
