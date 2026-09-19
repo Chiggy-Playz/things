@@ -23,7 +23,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -122,11 +122,22 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
 
         target_mode = HVACMode.COOL if kind == "timer_on" else HVACMode.OFF
 
+        @callback
         def _fire(_now) -> None:
+            # @callback tells HA this is safe to run directly on the event
+            # loop. Without it, async_call_later dispatches an unmarked
+            # function to a worker thread instead - and async_write_ha_state
+            # below is only safe to call from the event loop itself. That
+            # was true even before today's deadline-tracking sensor; this
+            # is the real root cause of the mode not flipping reliably.
+            #
+            # Mode flip first, deadline-clearing last - the latter is just
+            # display bookkeeping for the timestamp sensor and must never
+            # be able to block the former if it errors.
             self._timer_cancel.pop(kind, None)
-            self._entry.runtime_data.set_timer_deadline(kind, None)
             self._attr_hvac_mode = target_mode
             self.async_write_ha_state()
+            self._entry.runtime_data.set_timer_deadline(kind, None)
 
         self._timer_cancel[kind] = async_call_later(self.hass, hours * 3600, _fire)
 
@@ -160,9 +171,9 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
         back on by hand before an armed Off Timer elapses would still get
         silently flipped back to "off" later when that stale schedule fires.
         """
-        for kind, cancel in self._timer_cancel.items():
+        cancelled_kinds = list(self._timer_cancel.keys())
+        for cancel in self._timer_cancel.values():
             cancel()
-            self._entry.runtime_data.set_timer_deadline(kind, None)
         self._timer_cancel.clear()
 
         if hvac_mode == HVACMode.OFF:
@@ -177,6 +188,11 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
             )
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
+
+        # Deadline-clearing last, same reasoning as _fire - must never be
+        # able to block the actual IR commands/mode flip above.
+        for kind in cancelled_kinds:
+            self._entry.runtime_data.set_timer_deadline(kind, None)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         temp = kwargs.get(ATTR_TEMPERATURE)
