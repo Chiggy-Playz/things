@@ -25,28 +25,35 @@
  *        bits 4-5  (unused, typically 0b01)
  *        bit  6    Econo
  *        bit  7    TempSet (unused by the reference implementation either)
- *   [4]  bit   0    OnTimerNot24Hr  (0 = On Timer is exactly 24h, 1 =
- *                   otherwise - NOT part of a minutes value, despite
- *                   IRremoteESP8266 modelling bits 0-5 as "OnTimerMins".
- *                   Per the original reverse-engineer's own notes (GitHub
- *                   issue #1238, distinct from - and truer than - the
- *                   shipped C++ code) bit 0 is a dedicated 24h flag; bits
- *                   1-6 are undocumented and never varied in any real
- *                   capture regardless of duration (2/11/12/13/24h all
- *                   tested 2026-09-03) - treated as fixed/reserved here,
- *                   baked into voltas_reset instead of computed.
- *        bits 1-6  (reserved, always 0x3B's bits 1-6 on real hardware)
- *        bit  7    OnTimer12Hr
- *   [5]  bit   0    OffTimerNot24Hr (same deal as byte[4] bit 0, for Off Timer)
- *        bits 1-6  (reserved, same as byte[4])
- *        bit  7    OffTimer12Hr
+ *   [4]  OnTimerMinsRemaining  (0-59, plain integer, minutes remaining in
+ *                  the CURRENT hour of the On Timer countdown - mirrors
+ *                  byte[5] exactly on real hardware whenever only one of
+ *                  the two timers is actually armed, see below)
+ *   [5]  OffTimerMinsRemaining (same as byte[4], for the Off Timer)
+ *                  REVISES the previous "Not24Hr flag (bit0) + reserved
+ *                  (bits1-6) + 12Hr flag (bit7)" reading of these two
+ *                  bytes (dated 2026-09-03) - that was based on captures
+ *                  taken only near arm-time, where this counter always
+ *                  reads ~59-60 regardless of total duration selected,
+ *                  which is why it looked constant across different
+ *                  durations back then. Real capture 2026-10-05 (see
+ *                  node/tools/ir_capture.py/ir_decode.py) of a real
+ *                  1-hour Off Timer at +0/+61/+121/+452s elapsed showed
+ *                  byte[4]==byte[5] == 0x3B/0x3A/0x39/0x34 (59/58/57/52
+ *                  decimal) - a near-exact linear decrement of ~1 per
+ *                  elapsed real minute, completely unaffected by
+ *                  unrelated commands (temp changes) sent in between.
+ *                  That's a live countdown, not a static flag.
  *   [6]  constant 0x3B
- *   [7]  bits 0-3  OnTimerHrs   bits 4-7 OffTimerHrs  (hrs % 12 directly -
- *                  NOT (hrs%60/60)+1 like IRremoteESP8266's C++ implements;
- *                  that formula doesn't even match its own issue #1238
- *                  notes, and real IR capture 2026-09-03 across 2/11/12/
- *                  13/24h confirms the direct hrs%12 mapping the notes
- *                  describe, not the shipped code's off-by-one)
+ *   [7]  bits 0-3  OnTimerHrs   bits 4-7 OffTimerHrs - hours remaining,
+ *                  direct integer (0-15, nibble-limited). Whether this is
+ *                  a live "hours remaining" that decrements when the
+ *                  minutes byte above wraps 59->0, or a static "total
+ *                  hours originally selected", is UNCONFIRMED - the one
+ *                  real capture available was a 1-hour timer, which
+ *                  never crossed an hour boundary. Assumed live/
+ *                  decrementing here (the standard HH:MM countdown
+ *                  convention) but not verified above 1h.
  *   [8]  bits 0-4  (unused)  bit 5 Light  bit 6 OffTimerEnable  bit 7 OnTimerEnable
  *   [9]  Checksum
  *
@@ -61,6 +68,7 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 #include "ir/ir.h"
 #include "ir/voltas.h"
 
@@ -99,10 +107,10 @@
  * Power|bit3, not just Power alone). No setter below ever touches bit 3,
  * so baking it into the reset state is sufficient to keep it set in every
  * frame from here on.
- * Byte[4]/[5] = 0x3B (not 0x00): bits 1-6 are reserved/undocumented but
- * never varied across any real capture regardless of timer duration -
- * voltas_set_timer_on/off below only ever touch bit 0 (Not24Hr flag) and
- * bit 7 (12Hr flag), leaving this baked-in 0x3B for the rest. */
+ * Byte[4]/[5] = 0x3B (not 0x00): an arbitrary idle value for the
+ * minutes-remaining counter (see voltas_encode_timer) - irrelevant
+ * whenever the corresponding timer's enable bit (byte[8]) is clear, which
+ * it is at reset, so this is never actually read as a real duration. */
 static const uint8_t voltas_reset[VOLTAS_STATE_LEN] = {
 	0x33, 0xE8, 0x08, 0x1C, 0x3B, 0x3B, 0x3B, 0x00, 0x00, 0x00
 };
@@ -276,29 +284,40 @@ static void voltas_set_light(uint8_t *s, bool on)
 static int64_t on_timer_deadline_ms;
 static int64_t off_timer_deadline_ms;
 
-/* hrs = mins/60 directly (no +1) - confirmed against real IR capture
- * 2026-09-03 across 2/11/12/13/24h selections that the nibble is hrs%12
- * directly, matching the original reverse-engineer's own notes (see
- * top-of-file comment), not IRremoteESP8266's shipped (mins/60)+1 which
- * made every timer run exactly 1 hour longer than requested and doesn't
- * match its own source documentation.
- * bit 0 is the Not24Hr flag (0 only when hrs==24), not a minutes value -
- * bits 1-6 are left alone (see voltas_reset). Shared by voltas_set_timer_
- * on/off and voltas_refresh_timers so the encoding only lives in one
- * place. */
+/* mins = total minutes remaining. Splits into whole hours (byte[7]'s
+ * nibble) and minutes-remaining-in-the-current-hour (byte[4]/[5] directly,
+ * 0-59) - see the top-of-file comment for the real-capture evidence this
+ * replaced the old Not24Hr/12Hr/reserved-bits reading with. Shared by
+ * voltas_set_timer_on/off and voltas_refresh_timers so the encoding only
+ * lives in one place.
+ *
+ * hrs is clamped to 15 (nibble width) - every realistic duration this
+ * firmware ever sends (HA's timer slider tops out at a few hours, see
+ * custom_components/things/number.py's MAX_TIMER_HOURS) fits comfortably;
+ * what a real remote does above 15h was never part of what got captured
+ * and isn't worth guessing at here.
+ *
+ * mins is floored to 1 defensively. Every current caller already
+ * short-circuits before ever reaching here with mins==0 (see
+ * voltas_set_timer_on/off and voltas_refresh_timers's remaining_ms<=0
+ * branches), but mins==0 would encode hrs=0/mins_in_hr=0 - an "enabled,
+ * nothing left" state indistinguishable from "about to expire" that has
+ * no real meaning. This is exactly the shape of bug that bit us before
+ * (the old Not24Hr-based encoding silently turned an unrepresented "0"
+ * into the real AC showing a 24h timer, see top-of-file comment) - floor
+ * here so a future caller can't reintroduce it by accident. */
 static void voltas_encode_timer(uint8_t *s, bool is_on, uint16_t mins)
 {
-	uint16_t hrs = mins / 60;
-	uint8_t not24hr = (hrs == 24) ? 0 : 1;
-	uint8_t twelve_hr = (hrs / 12) & 1U;
-	uint8_t hrs_nibble = hrs % 12;
+	mins = MAX(mins, 1);
+	uint8_t hrs = (uint8_t)MIN(mins / 60, 15);
+	uint8_t mins_in_hr = (uint8_t)(mins % 60);
 
 	if (is_on) {
-		s[4] = (uint8_t)((s[4] & 0x7EU) | not24hr | (twelve_hr << 7));
-		s[7] = (uint8_t)((s[7] & 0xF0U) | hrs_nibble);
+		s[4] = mins_in_hr;
+		s[7] = (uint8_t)((s[7] & 0xF0U) | hrs);
 	} else {
-		s[5] = (uint8_t)((s[5] & 0x7EU) | not24hr | (twelve_hr << 7));
-		s[7] = (uint8_t)((s[7] & 0x0FU) | (hrs_nibble << 4));
+		s[5] = mins_in_hr;
+		s[7] = (uint8_t)((s[7] & 0x0FU) | (hrs << 4));
 	}
 }
 
@@ -358,12 +377,11 @@ static void voltas_refresh_timers(uint8_t *s)
 			on_timer_deadline_ms = 0;
 		} else {
 			/* Round up so a still-genuinely-active timer with
-			 * under a minute left never gets reported/rounded
-			 * down to 0 (which would look "expired" to anyone
-			 * reading the frame). Sub-hour remaining behavior
-			 * isn't verified against real hardware either way -
-			 * this remote/protocol only ever arms whole hours to
-			 * begin with. */
+			 * under a minute left never gets reported as 0
+			 * remaining. With the minutes-counter encoding above,
+			 * any remaining_mins >= 1 (including under an hour)
+			 * is representable directly - no more "hrs=0 looks
+			 * like something else" ambiguity. */
 			uint16_t remaining_mins =
 				(uint16_t)((remaining_ms + 59999) / 60000);
 			voltas_encode_timer(s, true, remaining_mins);

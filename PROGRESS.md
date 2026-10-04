@@ -1,8 +1,18 @@
 # Project status — read this first in a new session
 
-Last updated: 2026-08-17 (MCUboot/OTA attempted and abandoned same night —
-see that section first, it's the most recent thing that happened to the
-node and reverses real code that was briefly committed).
+Last updated: 2026-10-05 (Voltas Off/On-Timer encoding reverse-engineered
+from a real IR capture and fixed - see that section first, it's the most
+recent firmware change). The MCUboot/OTA section below it is older
+(2026-08-17) but still the most recent thing to happen to the
+bootloader/flash layout specifically.
+
+Also now significantly stale, not yet rewritten to match: everything below
+about "a real Home Assistant integration... discussed but not yet
+implemented" - that's done. `custom_components/things/` is a full working
+HACS integration (climate/number/sensor/event platforms, capability-driven
+entity creation, zeroconf discovery) - read the code there directly rather
+than trusting this doc's framing of it as hypothetical.
+
 Supersedes the 2026-08-11 version entirely
 — that session's active problem is resolved, and the architecture described
 there (standalone `ot_br`) is no longer what's running. Trust this over
@@ -12,6 +22,68 @@ anything you remember from a summarized/compacted history.
 [`hub/docs/README.md`](hub/docs/README.md) next — it has the correct doc
 reading order. Don't go straight to a specific doc in there; several
 describe retired setups and it's not obvious which from the filenames alone.
+
+## Voltas Off/On-Timer encoding - reverse-engineered from a real capture, fixed 2026-10-05
+
+**What was wrong**: `node/lib/ir/voltas.c`'s timer encoding (bytes `[4]`/`[5]`)
+was modeled on a 2026-08-16 bug investigation as "`Not24Hr` flag (bit0) +
+reserved (bits1-6) + `12Hr` flag (bit7)", carried forward from a 2026-09-03
+real-capture session that only ever sampled near arm-time. A later fix
+(same day as this one) added a "floor remaining time at 60 min" clamp to
+that model to stop it encoding a bogus "0 hours" - which turned out to
+itself be wrong, since it would have made the real AC's onboard timer
+re-arm to a fresh hour on every unrelated command sent during the final
+hour of a countdown (never shipped to real hardware, caught via code review
+before reflashing).
+
+**What we actually found**: built a real IR capture rig -
+`node/tools/ir_capture.py` (MicroPython on a separate Pico, TSOP1838 on
+GP1, raw mark/space timestamps over serial) and `node/tools/ir_decode.py`
+(decodes those captures into Voltas protocol bytes). Captured the *real*
+Voltas remote (not this firmware) through a full sequence: power on, two
+temp changes, arm a 1-hour Off Timer, then temp changes at +61s/+121s/+452s
+elapsed. Bytes `[0]`-`[3]` decoded exactly as expected at every step
+(power/mode/fan/temp), validating the capture pipeline. The timer bytes
+told a different story than the old model: `byte[4]` and `byte[5]` are
+byte-for-byte identical in every single frame (not independent On/Off
+fields as documented), and while the Off Timer was armed their value went
+`0x3B → 0x3A → 0x39 → 0x34` (59 → 58 → 57 → 52 decimal) across those four
+timestamps - a near-exact linear decrement of ~1 per real elapsed minute,
+completely unaffected by the unrelated temp commands sent in between. That's
+a live minutes-remaining counter, not a static flag/reserved byte - the old
+model looked right only because every prior capture happened to sample
+near arm-time, where this counter always reads ~59-60 regardless of which
+total duration was selected.
+
+**Fix applied**: rewrote `voltas_encode_timer` to split total remaining
+minutes into whole hours (`byte[7]`'s nibble, as before) and
+minutes-remaining-in-the-current-hour (`byte[4]`/`[5]` directly, 0-59,
+replacing the old flag scheme entirely). Removed the now-unnecessary
+floor-at-60-minutes hack from `voltas_refresh_timers` - the new encoding
+has no sub-hour ambiguity to work around. Added defensive clamps both ends
+(`hrs` capped at 15/nibble-width, `mins` floored to 1) so the exact shape
+of bug that caused the original "shows 24h" symptom structurally can't
+recur even if a future caller gets it wrong.
+
+**Still unconfirmed**: whether `byte[7]`'s hours nibble is live
+("hours remaining", decrementing when the minutes byte wraps 59→0 - the
+assumption this fix encodes) or static ("total hours originally
+selected"). The only real capture available was a 1-hour timer, which
+never crossed an hour boundary, so this is extrapolated from the standard
+HH:MM countdown convention, not verified. Low-stakes for now - see next
+paragraph.
+
+**Deliberate scope decision**: this fix only makes the AC's own onboard
+timer display/countdown accurate again - it does **not** address whether
+the real hardware timer is what actually triggers power-off. Chiggy
+confirmed the real remote's screen does turn the AC off and presumably
+sends a real off signal when its own timer elapses, but has decided not to
+rely on that: the actual "turn the AC off when a HA-armed timer elapses"
+behavior is being moved to Home Assistant's own side (`climate.py`'s
+`_fire` callback already tracks the deadline in software - currently it
+only flips HA's *belief*, not yet confirmed/extended to also issue a real
+`power_off` IR command). **Not yet implemented** - next piece of work on
+this thread.
 
 ## The big picture
 
