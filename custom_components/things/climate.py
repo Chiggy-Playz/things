@@ -108,16 +108,16 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
             self._entry.runtime_data.set_timer_deadline(kind, None)
         self._timer_cancel.clear()
 
-    def schedule_timer_switch(self, kind: str, hours: float) -> None:
+    def schedule_timer_switch(self, kind: str, mins: float) -> None:
         """Called by ThingsTimerNumber right after it arms a timer - flips
         our believed hvac_mode when that timer should have fired, since we
         have no real feedback from the AC to confirm it actually did (see
-        module docstring). kind is "timer_on" or "timer_off"; hours == 0
+        module docstring). kind is "timer_on" or "timer_off"; mins == 0
         means the timer was just cleared, so only cancel any pending flip
         for that kind rather than scheduling a new one."""
         if cancel := self._timer_cancel.pop(kind, None):
             cancel()
-        if hours <= 0:
+        if mins <= 0:
             return
 
         target_mode = HVACMode.COOL if kind == "timer_on" else HVACMode.OFF
@@ -139,7 +139,7 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
             self._entry.runtime_data.set_timer_deadline(kind, None)
 
-        self._timer_cancel[kind] = async_call_later(self.hass, hours * 3600, _fire)
+        self._timer_cancel[kind] = async_call_later(self.hass, mins * 60, _fire)
 
     @property
     def _client(self):

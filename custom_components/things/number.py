@@ -1,17 +1,18 @@
 """Number platform for the AC node's two IR timers.
 
-HA's climate entity has no native concept of a "turn on/off in N hours"
+HA's climate entity has no native concept of a "turn on/off in N minutes"
 timer, so these live here instead - setting the value fires the
 corresponding set_timer_on/set_timer_off command immediately (see
 node/lib/ir/ir.c), 0 clears that timer.
 
-Exposed in whole hours, not minutes: both the real Voltas remote's own UI
-and the Teco protocol's timer field only ever support whole-hour steps -
-see the timer investigation in memory/PROGRESS.md - so a raw 0-1440 minute
-number box let you enter values the hardware can't actually represent. A
-slider (capped at MAX_TIMER_HOURS, well under the protocol's real ceiling -
-nobody needs the full range on a slider) is a nicer control than a bare
-number box.
+Exposed in minutes, not hours: node/lib/ir/ir.c and voltas.c's
+set_timer_on/off already accept an arbitrary minute count - there was
+never an hour restriction at the protocol/firmware level, only here (this
+used to multiply a whole-hour slider value by 60 before sending). Whether
+the real AC actually honors a sub-hour initial arm value (e.g. 30 min) is
+exactly what's being tested now that PROGRESS.md's 2026-10-05 entry
+reverse-engineered the live countdown as minute-granular - see that entry
+for what's confirmed vs. still assumed.
 """
 
 from __future__ import annotations
@@ -30,10 +31,8 @@ from .device import device_info_for
 
 _LOGGER = logging.getLogger(__name__)
 
-# Teco's timer field clamps to 24h (node/lib/ir/teco.c) and Voltas' encoding
-# tops out in the same ballpark, but in practice nobody needs the full
-# range on a slider - capped lower for a usable control.
-MAX_TIMER_HOURS = 4
+# Matches the old 4-hour slider ceiling, just expressed in minutes now.
+MAX_TIMER_MINUTES = 240
 
 
 async def async_setup_entry(
@@ -49,7 +48,7 @@ async def async_setup_entry(
 
 
 class ThingsTimerNumber(NumberEntity):
-    """One of the two AC timers, in whole hours. 0 = clear.
+    """One of the two AC timers, in minutes. 0 = clear.
 
     Snaps back to 0 immediately after sending, rather than holding the set
     value and counting down on the number entity itself - a slider that's
@@ -57,8 +56,8 @@ class ThingsTimerNumber(NumberEntity):
     "how long left" readout lives on the matching timestamp sensor instead
     (sensor.py's ThingsTimerDeadlineSensor) - HA renders a timestamp as
     live relative time on its own, so nothing here needs to tick. Treat
-    this slider as a momentary "arm a timer for N hours now" trigger, not
-    a persisted duration display.
+    this slider as a momentary "arm a timer for N minutes now" trigger,
+    not a persisted duration display.
 
     Does still schedule a matching hvac_mode flip on the climate entity
     (see ThingsClimate.schedule_timer_switch) for when the timer *should*
@@ -69,10 +68,10 @@ class ThingsTimerNumber(NumberEntity):
 
     _attr_has_entity_name = True
     _attr_native_min_value = 0
-    _attr_native_max_value = MAX_TIMER_HOURS
-    _attr_native_step = 1
+    _attr_native_max_value = MAX_TIMER_MINUTES
+    _attr_native_step = 5
     _attr_mode = NumberMode.SLIDER
-    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_assumed_state = True
 
     def __init__(self, entry: ConfigEntry, kind: str, name: str, icon: str) -> None:
@@ -86,9 +85,9 @@ class ThingsTimerNumber(NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._entry.runtime_data.client.send_ir_command(
-            f"set_{self._kind}", mins=int(value) * 60
+            f"set_{self._kind}", mins=int(value)
         )
-        deadline = dt_util.utcnow() + timedelta(hours=value) if value > 0 else None
+        deadline = dt_util.utcnow() + timedelta(minutes=value) if value > 0 else None
         self._entry.runtime_data.set_timer_deadline(self._kind, deadline)
         if climate := self._entry.runtime_data.climate_entity:
             climate.schedule_timer_switch(self._kind, value)
