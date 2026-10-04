@@ -166,15 +166,24 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
         matching whatever HA already shows, not the firmware's own reset
         defaults.
 
-        A manual mode change here supersedes any pending timer-driven flip
-        scheduled by schedule_timer_switch - without this, turning the AC
-        back on by hand before an armed Off Timer elapses would still get
-        silently flipped back to "off" later when that stale schedule fires.
+        A manual mode change here supersedes any pending timer - both our
+        own believed schedule (schedule_timer_switch) AND the node's real
+        hardware timer, which otherwise keeps counting down and firing
+        regardless of what the user just did by hand. Clearing only our
+        own side (the previous behavior) left HA's belief correct but the
+        physical AC still armed - confirmed as a real gap, not imagined:
+        turning the AC off then on via HA left its timer icon lit the
+        whole time. Unconditional, not just for kinds schedule_timer_switch
+        currently knows about - that dict is empty after an HA restart
+        even though a real hardware timer can still be armed, so this
+        can't rely on it either.
         """
-        cancelled_kinds = list(self._timer_cancel.keys())
         for cancel in self._timer_cancel.values():
             cancel()
         self._timer_cancel.clear()
+
+        for kind in ("timer_on", "timer_off"):
+            await self._client.send_ir_command(f"set_{kind}", mins=0)
 
         if hvac_mode == HVACMode.OFF:
             await self._client.send_ir_command("power_off")
@@ -191,7 +200,7 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
 
         # Deadline-clearing last, same reasoning as _fire - must never be
         # able to block the actual IR commands/mode flip above.
-        for kind in cancelled_kinds:
+        for kind in ("timer_on", "timer_off"):
             self._entry.runtime_data.set_timer_deadline(kind, None)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
