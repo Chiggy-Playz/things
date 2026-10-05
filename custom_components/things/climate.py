@@ -108,16 +108,16 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
             self._entry.runtime_data.set_timer_deadline(kind, None)
         self._timer_cancel.clear()
 
-    def schedule_timer_switch(self, kind: str, mins: float) -> None:
+    def schedule_timer_switch(self, kind: str, hours: float) -> None:
         """Called by ThingsTimerNumber right after it arms a timer - flips
         our believed hvac_mode when that timer should have fired, since we
         have no real feedback from the AC to confirm it actually did (see
-        module docstring). kind is "timer_on" or "timer_off"; mins == 0
+        module docstring). kind is "timer_on" or "timer_off"; hours == 0
         means the timer was just cleared, so only cancel any pending flip
         for that kind rather than scheduling a new one."""
         if cancel := self._timer_cancel.pop(kind, None):
             cancel()
-        if mins <= 0:
+        if hours <= 0:
             return
 
         target_mode = HVACMode.COOL if kind == "timer_on" else HVACMode.OFF
@@ -139,7 +139,7 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
             self._entry.runtime_data.set_timer_deadline(kind, None)
 
-        self._timer_cancel[kind] = async_call_later(self.hass, mins * 60, _fire)
+        self._timer_cancel[kind] = async_call_later(self.hass, hours * 3600, _fire)
 
     @property
     def _client(self):
@@ -166,24 +166,15 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
         matching whatever HA already shows, not the firmware's own reset
         defaults.
 
-        A manual mode change here supersedes any pending timer - both our
-        own believed schedule (schedule_timer_switch) AND the node's real
-        hardware timer, which otherwise keeps counting down and firing
-        regardless of what the user just did by hand. Clearing only our
-        own side (the previous behavior) left HA's belief correct but the
-        physical AC still armed - confirmed as a real gap, not imagined:
-        turning the AC off then on via HA left its timer icon lit the
-        whole time. Unconditional, not just for kinds schedule_timer_switch
-        currently knows about - that dict is empty after an HA restart
-        even though a real hardware timer can still be armed, so this
-        can't rely on it either.
+        A manual mode change here supersedes any pending timer-driven flip
+        scheduled by schedule_timer_switch - without this, turning the AC
+        back on by hand before an armed Off Timer elapses would still get
+        silently flipped back to "off" later when that stale schedule fires.
         """
+        cancelled_kinds = list(self._timer_cancel.keys())
         for cancel in self._timer_cancel.values():
             cancel()
         self._timer_cancel.clear()
-
-        for kind in ("timer_on", "timer_off"):
-            await self._client.send_ir_command(f"set_{kind}", mins=0)
 
         if hvac_mode == HVACMode.OFF:
             await self._client.send_ir_command("power_off")
@@ -200,7 +191,7 @@ class ThingsClimate(ClimateEntity, RestoreEntity):
 
         # Deadline-clearing last, same reasoning as _fire - must never be
         # able to block the actual IR commands/mode flip above.
-        for kind in ("timer_on", "timer_off"):
+        for kind in cancelled_kinds:
             self._entry.runtime_data.set_timer_deadline(kind, None)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
